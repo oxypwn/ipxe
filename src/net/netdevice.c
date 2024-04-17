@@ -15,9 +15,13 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
  * 02110-1301, USA.
+ *
+ * You can also choose to distribute this program under the terms of
+ * the Unmodified Binary Distribution Licence (as given in the file
+ * COPYING.UBDL), provided that you have satisfied its requirements.
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -34,6 +38,8 @@ FILE_LICENCE ( GPL2_OR_LATER );
 #include <ipxe/malloc.h>
 #include <ipxe/device.h>
 #include <ipxe/errortab.h>
+#include <ipxe/profile.h>
+#include <ipxe/fault.h>
 #include <ipxe/vlan.h>
 #include <ipxe/netdevice.h>
 
@@ -48,6 +54,15 @@ struct list_head net_devices = LIST_HEAD_INIT ( net_devices );
 
 /** List of open network devices, in reverse order of opening */
 static struct list_head open_net_devices = LIST_HEAD_INIT ( open_net_devices );
+
+/** Network polling profiler */
+static struct profiler net_poll_profiler __profiler = { .name = "net.poll" };
+
+/** Network receive profiler */
+static struct profiler net_rx_profiler __profiler = { .name = "net.rx" };
+
+/** Network transmit profiler */
+static struct profiler net_tx_profiler __profiler = { .name = "net.tx" };
 
 /** Default unknown link status code */
 #define EUNKNOWN_LINK_STATUS __einfo_error ( EINFO_EUNKNOWN_LINK_STATUS )
@@ -95,17 +110,92 @@ static int netdev_has_ll_addr ( struct net_device *netdev ) {
 }
 
 /**
+ * Get offset of network device driver private data
+ *
+ * @v driver		Upper-layer driver, or NULL for device driver
+ * @ret offset		Offset of driver private data
+ */
+static size_t netdev_priv_offset ( struct net_driver *driver ) {
+	struct net_device *netdev;
+	unsigned int num_configs;
+	size_t offset;
+
+	/* Allow space for network device */
+	offset = sizeof ( *netdev );
+
+	/* Allow space for configurations */
+	num_configs = table_num_entries ( NET_DEVICE_CONFIGURATORS );
+	offset += ( num_configs * sizeof ( netdev->configs[0] ) );
+
+	/* Place variable-length device driver private data at end */
+	if ( ! driver )
+		driver = table_end ( NET_DRIVERS );
+
+	/* Allow space for preceding upper-layer drivers' private data */
+	for_each_table_entry_continue_reverse ( driver, NET_DRIVERS ) {
+		offset += driver->priv_len;
+	}
+
+	/* Sanity check */
+	assert ( ( offset & ( sizeof ( void * ) - 1 ) ) == 0 );
+
+	return offset;
+}
+
+/**
+ * Get network device driver private data
+ *
+ * @v netdev		Network device
+ * @v driver		Upper-layer driver, or NULL for device driver
+ * @ret priv		Driver private data
+ */
+void * netdev_priv ( struct net_device *netdev, struct net_driver *driver ) {
+
+	return ( ( ( void * ) netdev ) + netdev_priv_offset ( driver ) );
+}
+
+/**
  * Notify drivers of network device or link state change
  *
  * @v netdev		Network device
  */
 static void netdev_notify ( struct net_device *netdev ) {
 	struct net_driver *driver;
+	void *priv;
 
 	for_each_table_entry ( driver, NET_DRIVERS ) {
+		priv = netdev_priv ( netdev, driver );
 		if ( driver->notify )
-			driver->notify ( netdev );
+			driver->notify ( netdev, priv );
 	}
+}
+
+/**
+ * Freeze network device receive queue processing
+ *
+ * @v netdev		Network device
+ */
+void netdev_rx_freeze ( struct net_device *netdev ) {
+
+	/* Mark receive queue processing as frozen */
+	netdev->state |= NETDEV_RX_FROZEN;
+
+	/* Notify drivers of change */
+	netdev_notify ( netdev );
+}
+
+/**
+ * Unfreeze network device receive queue processing
+ *
+ * @v netdev		Network device
+ */
+void netdev_rx_unfreeze ( struct net_device *netdev ) {
+
+	/* Mark receive queue processing as not frozen */
+	netdev->state &= ~NETDEV_RX_FROZEN;
+
+	/* Notify drivers of change */
+	netdev_notify ( netdev );
 }
 
 /**
@@ -115,6 +205,9 @@ static void netdev_notify ( struct net_device *netdev ) {
  * @v rc		Link status code
  */
 void netdev_link_err ( struct net_device *netdev, int rc ) {
+
+	/* Stop link block timer */
+	stop_timer ( &netdev->link_block );
 
 	/* Record link state */
 	netdev->link_rc = rc;
@@ -143,6 +236,50 @@ void netdev_link_down ( struct net_device *netdev ) {
 	     ( netdev->link_rc == -EUNKNOWN_LINK_STATUS ) ) {
 		netdev_link_err ( netdev, -ENOTCONN_LINK_DOWN );
 	}
+}
+
+/**
+ * Mark network device link as being blocked
+ *
+ * @v netdev		Network device
+ * @v timeout		Timeout (in ticks)
+ */
+void netdev_link_block ( struct net_device *netdev, unsigned long timeout ) {
+
+	/* Start link block timer */
+	if ( ! netdev_link_blocked ( netdev ) ) {
+		DBGC ( netdev, "NETDEV %s link blocked for %ld ticks\n",
+		       netdev->name, timeout );
+	}
+	start_timer_fixed ( &netdev->link_block, timeout );
+}
+
+/**
+ * Mark network device link as being unblocked
+ *
+ * @v netdev		Network device
+ */
+void netdev_link_unblock ( struct net_device *netdev ) {
+
+	/* Stop link block timer */
+	if ( netdev_link_blocked ( netdev ) )
+		DBGC ( netdev, "NETDEV %s link unblocked\n", netdev->name );
+	stop_timer ( &netdev->link_block );
+}
+
+/**
+ * Handle network device link block timer expiry
+ *
+ * @v timer		Link block timer
+ * @v fail		Failure indicator
+ */
+static void netdev_link_block_expired ( struct retry_timer *timer,
+					int fail __unused ) {
+	struct net_device *netdev =
+		container_of ( timer, struct net_device, link_block );
+
+	/* Assume link is no longer blocked */
+	DBGC ( netdev, "NETDEV %s link block expired\n", netdev->name );
 }
 
 /**
@@ -199,30 +336,50 @@ int netdev_tx ( struct net_device *netdev, struct io_buffer *iobuf ) {
 
 	DBGC2 ( netdev, "NETDEV %s transmitting %p (%p+%zx)\n",
 		netdev->name, iobuf, iobuf->data, iob_len ( iobuf ) );
+	profile_start ( &net_tx_profiler );
 
 	/* Enqueue packet */
 	list_add_tail ( &iobuf->list, &netdev->tx_queue );
 
+	/* Guard against re-entry */
+	if ( netdev->state & NETDEV_TX_IN_PROGRESS ) {
+		rc = -EBUSY;
+		goto err_busy;
+	}
+	netdev->state |= NETDEV_TX_IN_PROGRESS;
+
 	/* Avoid calling transmit() on unopened network devices */
 	if ( ! netdev_is_open ( netdev ) ) {
 		rc = -ENETUNREACH;
-		goto err;
+		goto err_closed;
 	}
 
 	/* Discard packet (for test purposes) if applicable */
-	if ( ( NETDEV_DISCARD_RATE > 0 ) &&
-	     ( ( random() % NETDEV_DISCARD_RATE ) == 0 ) ) {
-		rc = -EAGAIN;
-		goto err;
+	if ( ( rc = inject_fault ( NETDEV_DISCARD_RATE ) ) != 0 )
+		goto err_fault;
+
+	/* Map for DMA, if required */
+	if ( netdev->dma && ( ! dma_mapped ( &iobuf->map ) ) ) {
+		if ( ( rc = iob_map_tx ( iobuf, netdev->dma ) ) != 0 )
+			goto err_map;
 	}
 
 	/* Transmit packet */
 	if ( ( rc = netdev->op->transmit ( netdev, iobuf ) ) != 0 )
-		goto err;
+		goto err_transmit;
 
+	/* Clear in-progress flag */
+	netdev->state &= ~NETDEV_TX_IN_PROGRESS;
+
+	profile_stop ( &net_tx_profiler );
 	return 0;
 
- err:
+ err_transmit:
+ err_map:
+ err_fault:
+ err_closed:
+	netdev->state &= ~NETDEV_TX_IN_PROGRESS;
+ err_busy:
 	netdev_tx_complete_err ( netdev, iobuf, rc );
 	return rc;
 }
@@ -248,6 +405,9 @@ int netdev_tx ( struct net_device *netdev, struct io_buffer *iobuf ) {
  * Failure to do this will cause the retransmitted packet to be
  * immediately redeferred (which will result in out-of-order
  * transmissions and other nastiness).
+ *
+ * I/O buffers that have been mapped for DMA will remain mapped while
+ * present in the deferred transmit queue.
  */
 void netdev_tx_defer ( struct net_device *netdev, struct io_buffer *iobuf ) {
 
@@ -273,6 +433,9 @@ void netdev_tx_defer ( struct net_device *netdev, struct io_buffer *iobuf ) {
  *
  * The packet is discarded and a TX error is recorded.  This function
  * takes ownership of the I/O buffer.
+ *
+ * The I/O buffer will be automatically unmapped for DMA, if
+ * applicable.
  */
 void netdev_tx_err ( struct net_device *netdev,
 		     struct io_buffer *iobuf, int rc ) {
@@ -286,6 +449,10 @@ void netdev_tx_err ( struct net_device *netdev,
 		DBGC ( netdev, "NETDEV %s transmission %p failed: %s\n",
 		       netdev->name, iobuf, strerror ( rc ) );
 	}
+
+	/* Unmap I/O buffer, if required */
+	if ( iobuf && dma_mapped ( &iobuf->map ) )
+		iob_unmap ( iobuf );
 
 	/* Discard packet */
 	free_iob ( iobuf );
@@ -310,11 +477,24 @@ void netdev_tx_complete_err ( struct net_device *netdev,
 	list_del ( &iobuf->list );
 	netdev_tx_err ( netdev, iobuf, rc );
 
-	/* Transmit first pending packet, if any */
-	if ( ( iobuf = list_first_entry ( &netdev->tx_deferred,
-					  struct io_buffer, list ) ) != NULL ) {
+	/* Handle pending transmit queue */
+	while ( ( iobuf = list_first_entry ( &netdev->tx_deferred,
+					     struct io_buffer, list ) ) ) {
+
+		/* Remove from pending transmit queue */
 		list_del ( &iobuf->list );
+
+		/* When any transmit completion fails, cancel all
+		 * pending transmissions.
+		 */
+		if ( rc != 0 ) {
+			netdev_tx_err ( netdev, iobuf, -ECANCELED );
+			continue;
+		}
+
+		/* Otherwise, attempt to transmit the first pending packet */
 		netdev_tx ( netdev, iobuf );
+		break;
 	}
 }
 
@@ -357,22 +537,29 @@ static void netdev_tx_flush ( struct net_device *netdev ) {
  * Add packet to receive queue
  *
  * @v netdev		Network device
- * @v iobuf		I/O buffer, or NULL
+ * @v iobuf		I/O buffer
  *
  * The packet is added to the network device's RX queue.  This
  * function takes ownership of the I/O buffer.
+ *
+ * The I/O buffer will be automatically unmapped for DMA, if
+ * applicable.
  */
 void netdev_rx ( struct net_device *netdev, struct io_buffer *iobuf ) {
+	int rc;
 
 	DBGC2 ( netdev, "NETDEV %s received %p (%p+%zx)\n",
 		netdev->name, iobuf, iobuf->data, iob_len ( iobuf ) );
 
 	/* Discard packet (for test purposes) if applicable */
-	if ( ( NETDEV_DISCARD_RATE > 0 ) &&
-	     ( ( random() % NETDEV_DISCARD_RATE ) == 0 ) ) {
-		netdev_rx_err ( netdev, iobuf, -EAGAIN );
+	if ( ( rc = inject_fault ( NETDEV_DISCARD_RATE ) ) != 0 ) {
+		netdev_rx_err ( netdev, iobuf, rc );
 		return;
 	}
+
+	/* Unmap I/O buffer, if required */
+	if ( dma_mapped ( &iobuf->map ) )
+		iob_unmap ( iobuf );
 
 	/* Enqueue packet */
 	list_add_tail ( &iobuf->list, &netdev->rx_queue );
@@ -392,12 +579,19 @@ void netdev_rx ( struct net_device *netdev, struct io_buffer *iobuf ) {
  * takes ownership of the I/O buffer.  @c iobuf may be NULL if, for
  * example, the net device wishes to report an error due to being
  * unable to allocate an I/O buffer.
+ *
+ * The I/O buffer will be automatically unmapped for DMA, if
+ * applicable.
  */
 void netdev_rx_err ( struct net_device *netdev,
 		     struct io_buffer *iobuf, int rc ) {
 
 	DBGC ( netdev, "NETDEV %s failed to receive %p: %s\n",
 	       netdev->name, iobuf, strerror ( rc ) );
+
+	/* Unmap I/O buffer, if required */
+	if ( iobuf && dma_mapped ( &iobuf->map ) )
+		iob_unmap ( iobuf );
 
 	/* Discard packet */
 	free_iob ( iobuf );
@@ -417,8 +611,18 @@ void netdev_rx_err ( struct net_device *netdev,
  */
 void netdev_poll ( struct net_device *netdev ) {
 
-	if ( netdev_is_open ( netdev ) )
-		netdev->op->poll ( netdev );
+	/* Avoid calling poll() on unopened network devices */
+	if ( ! netdev_is_open ( netdev ) )
+		return;
+
+	/* Guard against re-entry */
+	if ( netdev->state & NETDEV_POLL_IN_PROGRESS )
+		return;
+
+	/* Poll device */
+	netdev->state |= NETDEV_POLL_IN_PROGRESS;
+	netdev->op->poll ( netdev );
+	netdev->state &= ~NETDEV_POLL_IN_PROGRESS;
 }
 
 /**
@@ -498,7 +702,8 @@ static struct interface_descriptor netdev_config_desc =
 static void free_netdev ( struct refcnt *refcnt ) {
 	struct net_device *netdev =
 		container_of ( refcnt, struct net_device, refcnt );
-	
+
+	assert ( ! timer_running ( &netdev->link_block ) );
 	netdev_tx_flush ( netdev );
 	netdev_rx_flush ( netdev );
 	clear_settings ( netdev_settings ( netdev ) );
@@ -517,17 +722,13 @@ struct net_device * alloc_netdev ( size_t priv_len ) {
 	struct net_device *netdev;
 	struct net_device_configurator *configurator;
 	struct net_device_configuration *config;
-	unsigned int num_configs;
-	size_t confs_len;
-	size_t total_len;
 
-	num_configs = table_num_entries ( NET_DEVICE_CONFIGURATORS );
-	confs_len = ( num_configs * sizeof ( netdev->configs[0] ) );
-	total_len = ( sizeof ( *netdev ) + confs_len + priv_len );
-	netdev = zalloc ( total_len );
+	netdev = zalloc ( netdev_priv_offset ( NULL ) + priv_len );
 	if ( netdev ) {
 		ref_init ( &netdev->refcnt, free_netdev );
 		netdev->link_rc = -EUNKNOWN_LINK_STATUS;
+		timer_init ( &netdev->link_block, netdev_link_block_expired,
+			     &netdev->refcnt );
 		INIT_LIST_HEAD ( &netdev->tx_queue );
 		INIT_LIST_HEAD ( &netdev->tx_deferred );
 		INIT_LIST_HEAD ( &netdev->rx_queue );
@@ -541,8 +742,7 @@ struct net_device * alloc_netdev ( size_t priv_len ) {
 				    &netdev->refcnt );
 			config++;
 		}
-		netdev->priv = ( ( ( void * ) netdev ) + sizeof ( *netdev ) +
-				 confs_len );
+		netdev->priv = netdev_priv ( netdev, NULL );
 	}
 	return netdev;
 }
@@ -557,22 +757,47 @@ struct net_device * alloc_netdev ( size_t priv_len ) {
  * devices.
  */
 int register_netdev ( struct net_device *netdev ) {
-	static unsigned int ifindex = 0;
 	struct ll_protocol *ll_protocol = netdev->ll_protocol;
 	struct net_driver *driver;
+	struct net_device *duplicate;
+	unsigned int i;
 	uint32_t seed;
+	void *priv;
 	int rc;
-
-	/* Record device index and create device name */
-	netdev->index = ifindex++;
-	if ( netdev->name[0] == '\0' ) {
-		snprintf ( netdev->name, sizeof ( netdev->name ), "net%d",
-			   netdev->index );
-	}
 
 	/* Set initial link-layer address, if not already set */
 	if ( ! netdev_has_ll_addr ( netdev ) ) {
 		ll_protocol->init_addr ( netdev->hw_addr, netdev->ll_addr );
+	}
+
+	/* Set MTU, if not already set */
+	if ( ! netdev->mtu ) {
+		netdev->mtu = ( netdev->max_pkt_len -
+				ll_protocol->ll_header_len );
+	}
+
+	/* Reject named network devices that already exist */
+	if ( netdev->name[0] && ( duplicate = find_netdev ( netdev->name ) ) ) {
+		DBGC ( netdev, "NETDEV rejecting duplicate name %s\n",
+		       duplicate->name );
+		rc = -EEXIST;
+		goto err_duplicate;
+	}
+
+	/* Assign a unique device name, if not already set */
+	if ( netdev->name[0] == '\0' ) {
+		for ( i = 0 ; ; i++ ) {
+			snprintf ( netdev->name, sizeof ( netdev->name ),
+				   "net%d", i );
+			if ( find_netdev ( netdev->name ) == NULL )
+				break;
+		}
+	}
+
+	/* Assign a unique non-zero scope ID */
+	for ( netdev->scope_id = 1 ; ; netdev->scope_id++ ) {
+		if ( find_netdev_by_scope_id ( netdev->scope_id ) == NULL )
+			break;
 	}
 
 	/* Use least significant bits of the link-layer address to
@@ -600,7 +825,9 @@ int register_netdev ( struct net_device *netdev ) {
 
 	/* Probe device */
 	for_each_table_entry ( driver, NET_DRIVERS ) {
-		if ( driver->probe && ( rc = driver->probe ( netdev ) ) != 0 ) {
+		priv = netdev_priv ( netdev, driver );
+		if ( driver->probe &&
+		     ( rc = driver->probe ( netdev, priv ) ) != 0 ) {
 			DBGC ( netdev, "NETDEV %s could not add %s device: "
 			       "%s\n", netdev->name, driver->name,
 			       strerror ( rc ) );
@@ -612,12 +839,16 @@ int register_netdev ( struct net_device *netdev ) {
 
  err_probe:
 	for_each_table_entry_continue_reverse ( driver, NET_DRIVERS ) {
+		priv = netdev_priv ( netdev, driver );
 		if ( driver->remove )
-			driver->remove ( netdev );
+			driver->remove ( netdev, priv );
 	}
 	clear_settings ( netdev_settings ( netdev ) );
 	unregister_settings ( netdev_settings ( netdev ) );
  err_register_settings:
+	list_del ( &netdev->list );
+	netdev_put ( netdev );
+ err_duplicate:
 	return rc;
 }
 
@@ -636,12 +867,12 @@ int netdev_open ( struct net_device *netdev ) {
 
 	DBGC ( netdev, "NETDEV %s opening\n", netdev->name );
 
-	/* Open the device */
-	if ( ( rc = netdev->op->open ( netdev ) ) != 0 )
-		return rc;
-
 	/* Mark as opened */
 	netdev->state |= NETDEV_OPEN;
+
+	/* Open the device */
+	if ( ( rc = netdev->op->open ( netdev ) ) != 0 )
+		goto err;
 
 	/* Add to head of open devices list */
 	list_add ( &netdev->open_list, &open_net_devices );
@@ -650,6 +881,10 @@ int netdev_open ( struct net_device *netdev ) {
 	netdev_notify ( netdev );
 
 	return 0;
+
+ err:
+	netdev->state &= ~NETDEV_OPEN;
+	return rc;
 }
 
 /**
@@ -688,6 +923,9 @@ void netdev_close ( struct net_device *netdev ) {
 	/* Close the device */
 	netdev->op->close ( netdev );
 
+	/* Stop link block timer */
+	stop_timer ( &netdev->link_block );
+
 	/* Flush TX and RX queues */
 	netdev_tx_flush ( netdev );
 	netdev_rx_flush ( netdev );
@@ -702,14 +940,16 @@ void netdev_close ( struct net_device *netdev ) {
  */
 void unregister_netdev ( struct net_device *netdev ) {
 	struct net_driver *driver;
+	void *priv;
 
 	/* Ensure device is closed */
 	netdev_close ( netdev );
 
 	/* Remove device */
 	for_each_table_entry_reverse ( driver, NET_DRIVERS ) {
+		priv = netdev_priv ( netdev, driver );
 		if ( driver->remove )
-			driver->remove ( netdev );
+			driver->remove ( netdev, priv );
 	}
 
 	/* Unregister per-netdev configuration settings */
@@ -729,12 +969,9 @@ void unregister_netdev ( struct net_device *netdev ) {
  */
 void netdev_irq ( struct net_device *netdev, int enable ) {
 
-	/* Do nothing if device does not support interrupts */
-	if ( ! netdev_irq_supported ( netdev ) )
-		return;
-
-	/* Enable or disable device interrupts */
-	netdev->op->irq ( netdev, enable );
+	/* Enable or disable device interrupts, if applicable */
+	if ( netdev_irq_supported ( netdev ) )
+		netdev->op->irq ( netdev, enable );
 
 	/* Record interrupt enabled state */
 	netdev->state &= ~NETDEV_IRQ_ENABLED;
@@ -765,17 +1002,17 @@ struct net_device * find_netdev ( const char *name ) {
 }
 
 /**
- * Get network device by index
+ * Get network device by scope ID
  *
  * @v index		Network device index
  * @ret netdev		Network device, or NULL
  */
-struct net_device * find_netdev_by_index ( unsigned int index ) {
+struct net_device * find_netdev_by_scope_id ( unsigned int scope_id ) {
 	struct net_device *netdev;
 
 	/* Identify network device by index */
 	list_for_each_entry ( netdev, &net_devices, list ) {
-		if ( netdev->index == index )
+		if ( netdev->scope_id == scope_id )
 			return netdev;
 	}
 
@@ -900,7 +1137,9 @@ void net_poll ( void ) {
 	list_for_each_entry ( netdev, &net_devices, list ) {
 
 		/* Poll for new packets */
+		profile_start ( &net_poll_profiler );
 		netdev_poll ( netdev );
+		profile_stop ( &net_poll_profiler );
 
 		/* Leave received packets on the queue if receive
 		 * queue processing is currently frozen.  This will
@@ -917,6 +1156,7 @@ void net_poll ( void ) {
 			DBGC2 ( netdev, "NETDEV %s processing %p (%p+%zx)\n",
 				netdev->name, iobuf, iobuf->data,
 				iob_len ( iobuf ) );
+			profile_start ( &net_rx_profiler );
 
 			/* Remove link-layer header */
 			ll_protocol = netdev->ll_protocol;
@@ -935,6 +1175,7 @@ void net_poll ( void ) {
 				/* Record error for diagnosis */
 				netdev_rx_err ( netdev, NULL, rc );
 			}
+			profile_stop ( &net_rx_profiler );
 		}
 	}
 }
@@ -949,25 +1190,45 @@ static void net_step ( struct process *process __unused ) {
 }
 
 /**
- * Get the VLAN tag (when VLAN support is not present)
+ * Get the VLAN tag control information (when VLAN support is not present)
  *
  * @v netdev		Network device
  * @ret tag		0, indicating that device is not a VLAN device
  */
-__weak unsigned int vlan_tag ( struct net_device *netdev __unused ) {
+__weak unsigned int vlan_tci ( struct net_device *netdev __unused ) {
 	return 0;
 }
 
 /**
- * Identify VLAN device (when VLAN support is not present)
+ * Add VLAN tag-stripped packet to queue (when VLAN support is not present)
  *
- * @v trunk		Trunk network device
- * @v tag		VLAN tag
- * @ret netdev		VLAN device, if any
+ * @v netdev		Network device
+ * @v tag		VLAN tag, or zero
+ * @v iobuf		I/O buffer
  */
-__weak struct net_device * vlan_find ( struct net_device *trunk __unused,
-				       unsigned int tag __unused ) {
-	return NULL;
+__weak void vlan_netdev_rx ( struct net_device *netdev, unsigned int tag,
+			     struct io_buffer *iobuf ) {
+
+	if ( tag == 0 ) {
+		netdev_rx ( netdev, iobuf );
+	} else {
+		netdev_rx_err ( netdev, iobuf, -ENODEV );
+	}
+}
+
+/**
+ * Discard received VLAN tag-stripped packet (when VLAN support is not present)
+ *
+ * @v netdev		Network device
+ * @v tag		VLAN tag, or zero
+ * @v iobuf		I/O buffer, or NULL
+ * @v rc		Packet status code
+ */
+__weak void vlan_netdev_rx_err ( struct net_device *netdev,
+				 unsigned int tag __unused,
+				 struct io_buffer *iobuf, int rc ) {
+
+	netdev_rx_err ( netdev, iobuf, rc );
 }
 
 /** Networking stack process */
@@ -991,7 +1252,9 @@ static unsigned int net_discard ( void ) {
 
 			/* Discard first deferred packet */
 			list_del ( &iobuf->list );
-			free ( iobuf );
+			if ( dma_mapped ( &iobuf->map ) )
+				iob_unmap ( iobuf );
+			free_iob ( iobuf );
 
 			/* Report discard */
 			discarded++;

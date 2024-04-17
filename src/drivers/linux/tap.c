@@ -19,7 +19,7 @@
 #include <errno.h>
 #include <string.h>
 #include <stdio.h>
-#include <linux_api.h>
+#include <ipxe/linux_api.h>
 #include <ipxe/list.h>
 #include <ipxe/linux.h>
 #include <ipxe/malloc.h>
@@ -31,6 +31,7 @@
 #include <ipxe/socket.h>
 
 /* This hack prevents pre-2.6.32 headers from redefining struct sockaddr */
+#define _SYS_SOCKET_H
 #define __GLIBC__ 2
 #include <linux/socket.h>
 #undef __GLIBC__
@@ -39,6 +40,7 @@
 #include <linux/if_tun.h>
 
 #define RX_BUF_SIZE 1536
+#define RX_QUOTA 4
 
 /** @file
  *
@@ -53,6 +55,10 @@ struct tap_nic {
 	/** File descriptor of the opened tap device */
 	int fd;
 };
+
+/** Default MAC address */
+static const uint8_t tap_default_mac[ETH_ALEN] =
+	{ 0x52, 0x54, 0x00, 0x12, 0x34, 0x56 };
 
 /** Open the TAP device */
 static int tap_open(struct net_device * netdev)
@@ -126,6 +132,7 @@ static void tap_poll(struct net_device *netdev)
 	struct tap_nic * nic = netdev->priv;
 	struct pollfd pfd;
 	struct io_buffer * iobuf;
+	unsigned int quota = RX_QUOTA;
 	int r;
 
 	pfd.fd = nic->fd;
@@ -143,7 +150,8 @@ static void tap_poll(struct net_device *netdev)
 	if (! iobuf)
 		goto allocfail;
 
-	while ((r = linux_read(nic->fd, iobuf->data, RX_BUF_SIZE)) > 0) {
+	while (quota-- &&
+	       ((r = linux_read(nic->fd, iobuf->data, RX_BUF_SIZE)) > 0)) {
 		DBGC2(nic, "tap %p read %d bytes\n", nic, r);
 
 		iob_put(iobuf, r);
@@ -198,6 +206,7 @@ static int tap_probe(struct linux_device *device, struct linux_device_request *r
 	nic = netdev->priv;
 	linux_set_drvdata(device, netdev);
 	netdev->dev = &device->dev;
+	memcpy ( netdev->hw_addr, tap_default_mac, ETH_ALEN );
 	memset(nic, 0, sizeof(*nic));
 
 	/* Look for the mandatory if setting */
@@ -227,9 +236,9 @@ static int tap_probe(struct linux_device *device, struct linux_device_request *r
 
 	return 0;
 
-err_settings:
 	unregister_netdev(netdev);
 err_register:
+err_settings:
 	netdev_nullify(netdev);
 	netdev_put(netdev);
 	return rc;

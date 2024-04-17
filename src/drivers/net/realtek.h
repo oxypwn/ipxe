@@ -7,7 +7,7 @@
  *
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 #include <ipxe/spi.h>
 #include <ipxe/spi_bit.h>
@@ -140,6 +140,7 @@ enum realtek_legacy_status {
 
 /** Receive (Rx) Configuration Register (dword) */
 #define RTL_RCR 0x44
+#define RTL_RCR_STOP_WORKING	0x01000000UL /**< Here be dragons */
 #define RTL_RCR_RXFTH(x)	( (x) << 13 ) /**< Receive FIFO threshold */
 #define RTL_RCR_RXFTH_MASK	RTL_RCR_RXFTH ( 0x7 )
 #define RTL_RCR_RXFTH_DEFAULT	RTL_RCR_RXFTH ( 0x7 /* Whole packet */ )
@@ -187,7 +188,13 @@ enum realtek_legacy_status {
 
 /** Media Status Register (byte, 8139 only) */
 #define RTL_MSR 0x58
+#define RTL_MSR_TXFCE		0x80	/**< TX flow control enabled */
+#define RTL_MSR_RXFCE		0x40	/**< RX flow control enabled */
+#define RTL_MSR_AUX_STATUS	0x10	/**< Aux power present */
+#define RTL_MSR_SPEED_10	0x08	/**< 10Mbps */
 #define RTL_MSR_LINKB		0x04	/**< Inverse of link status */
+#define RTL_MSR_TXPF		0x02	/**< TX pause flag */
+#define RTL_MSR_RXPF		0x01	/**< RX pause flag */
 
 /** PHY Access Register (dword, 8169 only) */
 #define RTL_PHYAR 0x60
@@ -204,7 +211,14 @@ enum realtek_legacy_status {
 
 /** PHY (GMII, MII, or TBI) Status Register (byte, 8169 only) */
 #define RTL_PHYSTATUS 0x6c
+#define RTL_PHYSTATUS_ENTBI	0x80	/**< TBI / GMII mode */
+#define RTL_PHYSTATUS_TXFLOW	0x40	/**< TX flow control enabled */
+#define RTL_PHYSTATUS_RXFLOW	0x20	/**< RX flow control enabled */
+#define RTL_PHYSTATUS_1000MF	0x10	/**< 1000Mbps full-duplex */
+#define RTL_PHYSTATUS_100M	0x08	/**< 100Mbps */
+#define RTL_PHYSTATUS_10M	0x04	/**< 10Mbps */
 #define RTL_PHYSTATUS_LINKSTS	0x02	/**< Link ok */
+#define RTL_PHYSTATUS_FULLDUP	0x01	/**< Full duplex */
 
 /** Transmit Priority Polling Register (byte, 8139C+ only) */
 #define RTL_TPPOLL_8139CP 0xd9
@@ -214,8 +228,9 @@ enum realtek_legacy_status {
 
 /** C+ Command Register (word) */
 #define RTL_CPCR 0xe0
-#define RTL_CPCR_DAC		0x0010	/**< PCI Dual Address Cycle Enable */
-#define RTL_CPCR_MULRW		0x0008	/**< PCI Multiple Read/Write Enable */
+#define RTL_CPCR_VLAN		0x0040	/**< VLAN tag stripping enable */
+#define RTL_CPCR_DAC		0x0010	/**< PCI Dual Address Cycle enable */
+#define RTL_CPCR_MULRW		0x0008	/**< PCI Multiple Read/Write enable */
 #define RTL_CPCR_CPRX		0x0002	/**< C+ receive enable */
 #define RTL_CPCR_CPTX		0x0001	/**< C+ transmit enable */
 
@@ -233,6 +248,8 @@ enum realtek_legacy_status {
 struct realtek_ring {
 	/** Descriptors */
 	struct realtek_descriptor *desc;
+	/** Descriptor ring DMA mapping */
+	struct dma_mapping map;
 	/** Producer index */
 	unsigned int prod;
 	/** Consumer index */
@@ -258,10 +275,22 @@ realtek_init_ring ( struct realtek_ring *ring, unsigned int count,
 	ring->reg = reg;
 }
 
+/** Receive buffer (legacy mode *) */
+struct realtek_rx_buffer {
+	/** Buffer */
+	void *data;
+	/** Buffer DMA mapping */
+	struct dma_mapping map;
+	/** Offset within buffer */
+	unsigned int offset;
+};
+
 /** A Realtek network card */
 struct realtek_nic {
 	/** Registers */
 	void *regs;
+	/** DMA device */
+	struct dma_device *dma;
 	/** SPI bit-bashing interface */
 	struct spi_bit_basher spibit;
 	/** EEPROM */
@@ -269,7 +298,9 @@ struct realtek_nic {
 	/** Non-volatile options */
 	struct nvo_block nvo;
 	/** MII interface */
-	struct mii_interface mii;
+	struct mii_interface mdio;
+	/** MII device */
+	struct mii_device mii;
 
 	/** Legacy datapath mode */
 	int legacy;
@@ -285,9 +316,7 @@ struct realtek_nic {
 	/** Receive I/O buffers */
 	struct io_buffer *rx_iobuf[RTL_NUM_RX_DESC];
 	/** Receive buffer (legacy mode) */
-	void *rx_buffer;
-	/** Offset within receive buffer (legacy mode) */
-	unsigned int rx_offset;
+	struct realtek_rx_buffer rxbuf;
 };
 
 #endif /* _REALTEK_H */

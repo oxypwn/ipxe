@@ -15,23 +15,31 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
  * 02110-1301, USA.
+ *
+ * You can also choose to distribute this program under the terms of
+ * the Unmodified Binary Distribution Licence (as given in the file
+ * COPYING.UBDL), provided that you have satisfied its requirements.
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <ctype.h>
 #include <errno.h>
 #include <getopt.h>
+#include <ipxe/uuid.h>
 #include <ipxe/netdevice.h>
 #include <ipxe/menu.h>
 #include <ipxe/settings.h>
 #include <ipxe/params.h>
 #include <ipxe/timer.h>
+#include <ipxe/keys.h>
 #include <ipxe/parseopt.h>
+#include <config/branding.h>
 
 /** @file
  *
@@ -88,7 +96,7 @@ int parse_integer ( char *text, unsigned int *value ) {
 
 	/* Parse integer */
 	*value = strtoul ( text, &endp, 0 );
-	if ( *endp ) {
+	if ( *endp || ( ! *text ) ) {
 		printf ( "\"%s\": invalid integer value\n", text );
 		return -EINVAL_INTEGER;
 	}
@@ -112,7 +120,30 @@ int parse_timeout ( char *text, unsigned long *value ) {
 		return rc;
 
 	/* Convert to a number of timer ticks */
-	*value = ( ( value_ms * TICKS_PER_SEC ) / 1000 );
+	*value = ( value_ms * TICKS_PER_MS );
+
+	return 0;
+}
+
+/**
+ * Parse UUID
+ *
+ * @v text		Text
+ * @ret uuid		UUID value
+ * @ret rc		Return status code
+ */
+int parse_uuid ( char *text, struct uuid_option *uuid ) {
+	int rc;
+
+	/* Sanity check */
+	assert ( text != NULL );
+
+	/* Parse UUID */
+	if ( ( rc = uuid_aton ( text, &uuid->buf ) ) != 0 ) {
+		printf ( "\"%s\": invalid UUID\n", text );
+		return rc;
+	}
+	uuid->value = &uuid->buf;
 
 	return 0;
 }
@@ -208,6 +239,7 @@ int parse_flag ( char *text __unused, int *flag ) {
  * @ret rc		Return status code
  */
 int parse_key ( char *text, unsigned int *key ) {
+	int rc;
 
 	/* Interpret single characters as being a literal key character */
 	if ( text[0] && ! text[1] ) {
@@ -216,7 +248,17 @@ int parse_key ( char *text, unsigned int *key ) {
 	}
 
 	/* Otherwise, interpret as an integer */
-	return parse_integer ( text, key );
+	if ( ( rc = parse_integer ( text, key ) ) < 0 )
+		return rc;
+
+	/* For backwards compatibility with existing scripts, treat
+	 * integers between the ASCII range and special key range as
+	 * being relative special key values.
+	 */
+	if ( ( ! isascii ( *key ) ) && ( *key < KEY_MIN ) )
+		*key += KEY_MIN;
+
+	return 0;
 }
 
 /**
@@ -297,7 +339,7 @@ int parse_autovivified_setting ( char *text, struct named_setting *setting ) {
 }
 
 /**
- * Parse form parameter list name
+ * Parse request parameter list name
  *
  * @v text		Text
  * @ret params		Parameter list
@@ -343,7 +385,7 @@ void print_usage ( struct command_descriptor *cmd, char **argv ) {
 	}
 	if ( cmd->usage )
 		printf ( " %s", cmd->usage );
-	printf ( "\n\nSee http://ipxe.org/cmd/%s for further information\n",
+	printf ( "\n\nSee " PRODUCT_COMMAND_URI " for further information\n",
 		 argv[0] );
 }
 

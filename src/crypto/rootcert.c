@@ -15,9 +15,13 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
  * 02110-1301, USA.
+ *
+ * You can also choose to distribute this program under the terms of
+ * the Unmodified Binary Distribution Licence (as given in the file
+ * COPYING.UBDL), provided that you have satisfied its requirements.
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 #include <stdlib.h>
 #include <ipxe/crypto.h>
@@ -67,6 +71,7 @@ static struct setting trust_setting __setting ( SETTING_CRYPTO, trust ) = {
 
 /** Root certificates */
 struct x509_root root_certificates = {
+	.refcnt = REF_INIT ( ref_no_free ),
 	.digest = &sha256_algorithm,
 	.count = ( sizeof ( fingerprints ) / FINGERPRINT_LEN ),
 	.fingerprints = fingerprints,
@@ -89,13 +94,14 @@ struct x509_root root_certificates = {
  * a rebuild.
  */
 static void rootcert_init ( void ) {
+	static int initialised;
 	void *external = NULL;
 	int len;
 
 	/* Allow trusted root certificates to be overridden only if
 	 * not explicitly specified at build time.
 	 */
-	if ( ALLOW_TRUST_OVERRIDE ) {
+	if ( ALLOW_TRUST_OVERRIDE && ( ! initialised ) ) {
 
 		/* Fetch copy of "trust" setting, if it exists.  This
 		 * memory will never be freed.
@@ -105,6 +111,9 @@ static void rootcert_init ( void ) {
 			root_certificates.fingerprints = external;
 			root_certificates.count = ( len / FINGERPRINT_LEN );
 		}
+
+		/* Prevent subsequent modifications */
+		initialised = 1;
 	}
 
 	DBGC ( &root_certificates, "ROOTCERT using %d %s certificate(s):\n",
@@ -114,6 +123,7 @@ static void rootcert_init ( void ) {
 }
 
 /** Root certificate initialiser */
-struct init_fn rootcert_init_fn __init_fn ( INIT_LATE ) = {
-	.initialise = rootcert_init,
+struct startup_fn rootcert_startup_fn __startup_fn ( STARTUP_LATE ) = {
+	.name = "rootcert",
+	.startup = rootcert_init,
 };

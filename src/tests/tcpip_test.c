@@ -15,9 +15,13 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
  * 02110-1301, USA.
+ *
+ * You can also choose to distribute this program under the terms of
+ * the Unmodified Binary Distribution Licence (as given in the file
+ * COPYING.UBDL), provided that you have satisfied its requirements.
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 /** @file
  *
@@ -35,6 +39,9 @@ FILE_LICENCE ( GPL2_OR_LATER );
 #include <ipxe/test.h>
 #include <ipxe/profile.h>
 #include <ipxe/tcpip.h>
+
+/** Number of sample iterations for profiling */
+#define PROFILE_COUNT 16
 
 /** A TCP/IP fixed-data test */
 struct tcpip_test {
@@ -87,6 +94,12 @@ TCPIP_TEST ( one_byte, DATA ( 0xeb ) );
 /** Double byte */
 TCPIP_TEST ( two_bytes, DATA ( 0xba, 0xbe ) );
 
+/** Positive zero data */
+TCPIP_TEST ( positive_zero, DATA ( 0x00, 0x00 ) );
+
+/** Negative zero data */
+TCPIP_TEST ( negative_zero, DATA ( 0xff, 0xff ) );
+
 /** Final wrap-around carry (big-endian) */
 TCPIP_TEST ( final_carry_big,
 	     DATA ( 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 ) );
@@ -119,9 +132,17 @@ TCPIP_RANDOM_TEST ( partial, 0xcafebabe, 121, 5 );
  *
  * This is a reference implementation taken from RFC1071 (and modified
  * to fix compilation without warnings under gcc).
+ *
+ * The initial value of the one's complement @c sum is changed from
+ * positive zero (0x0000) to negative zero (0xffff).  This ensures
+ * that the return value will always use the positive representation
+ * of zero (0x0000).  Without this change, the return value would use
+ * negative zero (0xffff) if the input data is zero length (or all
+ * zeros) but positive zero (0x0000) for any other data which sums to
+ * zero.
  */
 static uint16_t rfc_tcpip_chksum ( const void *data, size_t len ) {
-	unsigned long sum = 0;
+	unsigned long sum = 0xffff;
 
         while ( len > 1 )  {
 		sum += *( ( uint16_t * ) data );
@@ -135,6 +156,7 @@ static uint16_t rfc_tcpip_chksum ( const void *data, size_t len ) {
 	while ( sum >> 16 )
 		sum = ( ( sum & 0xffff ) + ( sum >> 16 ) );
 
+	assert ( sum != 0x0000 );
 	return ~sum;
 }
 
@@ -142,51 +164,74 @@ static uint16_t rfc_tcpip_chksum ( const void *data, size_t len ) {
  * Report TCP/IP fixed-data test result
  *
  * @v test		TCP/IP test
+ * @v file		Test code file
+ * @v line		Test code line
  */
-#define tcpip_ok( test ) do {						\
-	uint16_t expected;						\
-	uint16_t generic_sum;						\
-	uint16_t sum;							\
-	expected = rfc_tcpip_chksum ( (test)->data, (test)->len );	\
-	generic_sum = generic_tcpip_continue_chksum ( TCPIP_EMPTY_CSUM,	\
-						      (test)->data,	\
-						      (test)->len );	\
-	ok ( generic_sum == expected );					\
-	sum = tcpip_continue_chksum ( TCPIP_EMPTY_CSUM, (test)->data,	\
-				      (test)->len );			\
-	ok ( sum == expected );						\
-	} while ( 0 )
+static void tcpip_okx ( struct tcpip_test *test, const char *file,
+			unsigned int line ) {
+	uint16_t expected;
+	uint16_t generic_sum;
+	uint16_t sum;
+
+	/* Verify generic_tcpip_continue_chksum() result */
+	expected = rfc_tcpip_chksum ( test->data, test->len );
+	generic_sum = generic_tcpip_continue_chksum ( TCPIP_EMPTY_CSUM,
+						      test->data, test->len );
+	okx ( generic_sum == expected, file, line );
+
+	/* Verify optimised tcpip_continue_chksum() result */
+	sum = tcpip_continue_chksum ( TCPIP_EMPTY_CSUM, test->data, test->len );
+	okx ( sum == expected, file, line );
+}
+#define tcpip_ok( test ) tcpip_okx ( test, __FILE__, __LINE__ )
 
 /**
  * Report TCP/IP pseudorandom-data test result
  *
  * @v test		TCP/IP test
+ * @v file		Test code file
+ * @v line		Test code line
  */
-#define tcpip_random_ok( test ) do {					\
-	uint8_t *data = ( tcpip_data + (test)->offset );		\
-	uint16_t expected;						\
-	uint16_t generic_sum;						\
-	uint16_t sum;							\
-	unsigned long elapsed;						\
-	unsigned int i;							\
-	assert ( ( (test)->len + (test)->offset ) <=			\
-		 sizeof ( tcpip_data ) );				\
-	srandom ( (test)->seed );					\
-	for ( i = 0 ; i < (test)->len ; i++ )				\
-		data[i] = random();					\
-	expected = rfc_tcpip_chksum ( data, (test)->len );		\
-	generic_sum = generic_tcpip_continue_chksum ( TCPIP_EMPTY_CSUM,	\
-						      data,		\
-						      (test)->len );	\
-	ok ( generic_sum == expected );					\
-	simple_profile();						\
-	sum = tcpip_continue_chksum ( TCPIP_EMPTY_CSUM, data,		\
-				      (test)->len );			\
-	elapsed = simple_profile();					\
-	ok ( sum == expected );						\
-	DBG ( "TCPIP checksummed %zd bytes (+%zd) in %ld ticks\n",	\
-	      (test)->len, (test)->offset, elapsed );			\
-	} while ( 0 )
+static void tcpip_random_okx ( struct tcpip_random_test *test,
+			       const char *file, unsigned int line ) {
+	uint8_t *data = ( tcpip_data + test->offset );
+	struct profiler profiler;
+	uint16_t expected;
+	uint16_t generic_sum;
+	uint16_t sum;
+	unsigned int i;
+
+	/* Sanity check */
+	assert ( ( test->len + test->offset ) <= sizeof ( tcpip_data ) );
+
+	/* Generate random data */
+	srandom ( test->seed );
+	for ( i = 0 ; i < test->len ; i++ )
+		data[i] = random();
+
+	/* Verify generic_tcpip_continue_chksum() result */
+	expected = rfc_tcpip_chksum ( data, test->len );
+	generic_sum = generic_tcpip_continue_chksum ( TCPIP_EMPTY_CSUM,
+						      data, test->len );
+	okx ( generic_sum == expected, file, line );
+
+	/* Verify optimised tcpip_continue_chksum() result */
+	sum = tcpip_continue_chksum ( TCPIP_EMPTY_CSUM, data, test->len );
+	okx ( sum == expected, file, line );
+
+	/* Profile optimised calculation */
+	memset ( &profiler, 0, sizeof ( profiler ) );
+	for ( i = 0 ; i < PROFILE_COUNT ; i++ ) {
+		profile_start ( &profiler );
+		sum = tcpip_continue_chksum ( TCPIP_EMPTY_CSUM, data,
+					      test->len );
+		profile_stop ( &profiler );
+	}
+	DBG ( "TCPIP checksummed %zd bytes (+%zd) in %ld +/- %ld ticks\n",
+	      test->len, test->offset, profile_mean ( &profiler ),
+	      profile_stddev ( &profiler ) );
+}
+#define tcpip_random_ok( test ) tcpip_random_okx ( test, __FILE__, __LINE__ )
 
 /**
  * Perform TCP/IP self-tests
@@ -197,6 +242,8 @@ static void tcpip_test_exec ( void ) {
 	tcpip_ok ( &empty );
 	tcpip_ok ( &one_byte );
 	tcpip_ok ( &two_bytes );
+	tcpip_ok ( &positive_zero );
+	tcpip_ok ( &negative_zero );
 	tcpip_ok ( &final_carry_big );
 	tcpip_ok ( &final_carry_little );
 	tcpip_random_ok ( &random_aligned );

@@ -15,14 +15,18 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
  * 02110-1301, USA.
+ *
+ * You can also choose to distribute this program under the terms of
+ * the Unmodified Binary Distribution Licence (as given in the file
+ * COPYING.UBDL), provided that you have satisfied its requirements.
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 #include <stdio.h>
 #include <errno.h>
 #include <byteswap.h>
-#include <linux_api.h>
+#include <ipxe/linux_api.h>
 #include <ipxe/linux.h>
 #include <ipxe/pci.h>
 
@@ -183,3 +187,12 @@ int linux_pci_write ( struct pci_device *pci, unsigned long where,
  err_open:
 	return rc;
 }
+
+PROVIDE_PCIAPI_INLINE ( linux, pci_discover );
+PROVIDE_PCIAPI_INLINE ( linux, pci_read_config_byte );
+PROVIDE_PCIAPI_INLINE ( linux, pci_read_config_word );
+PROVIDE_PCIAPI_INLINE ( linux, pci_read_config_dword );
+PROVIDE_PCIAPI_INLINE ( linux, pci_write_config_byte );
+PROVIDE_PCIAPI_INLINE ( linux, pci_write_config_word );
+PROVIDE_PCIAPI_INLINE ( linux, pci_write_config_dword );
+PROVIDE_PCIAPI_INLINE ( linux, pci_ioremap );

@@ -15,12 +15,18 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
  * 02110-1301, USA.
+ *
+ * You can also choose to distribute this program under the terms of
+ * the Unmodified Binary Distribution Licence (as given in the file
+ * COPYING.UBDL), provided that you have satisfied its requirements.
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 #include <stddef.h>
 #include <stdarg.h>
+#include <stdlib.h>
+#include <errno.h>
 #include <ipxe/vsprintf.h>
 #include <ipxe/efi/efi_strings.h>
 
@@ -143,6 +149,48 @@ int efi_ssnprintf ( wchar_t *wbuf, ssize_t swsize, const char *fmt, ... ) {
 	/* Hand off to vssnprintf */
 	va_start ( args, fmt );
 	len = efi_vssnprintf ( wbuf, swsize, fmt, args );
+	va_end ( args );
+	return len;
+}
+
+/**
+ * Write a formatted string to newly allocated memory
+ *
+ * @v wstrp		Pointer to hold allocated string
+ * @v fmt		Format string
+ * @v args		Arguments corresponding to the format string
+ * @ret len		Length of formatted string (in wide characters)
+ */
+int efi_vasprintf ( wchar_t **wstrp, const char *fmt, va_list args ) {
+	size_t len;
+	va_list args_tmp;
+
+	/* Calculate length needed for string */
+	va_copy ( args_tmp, args );
+	len = ( efi_vsnprintf ( NULL, 0, fmt, args_tmp ) + 1 );
+	va_end ( args_tmp );
+
+	/* Allocate and fill string */
+	*wstrp = malloc ( len * sizeof ( **wstrp ) );
+	if ( ! *wstrp )
+		return -ENOMEM;
+	return efi_vsnprintf ( *wstrp, len, fmt, args );
+}
+
+/**
+ * Write a formatted string to newly allocated memory
+ *
+ * @v wstrp		Pointer to hold allocated string
+ * @v fmt		Format string
+ * @v ...		Arguments corresponding to the format string
+ * @ret len		Length of formatted string (in wide characters)
+ */
+int efi_asprintf ( wchar_t **wstrp, const char *fmt, ... ) {
+	va_list args;
+	int len;
+
+	va_start ( args, fmt );
+	len = efi_vasprintf ( wstrp, fmt, args );
 	va_end ( args );
 	return len;
 }

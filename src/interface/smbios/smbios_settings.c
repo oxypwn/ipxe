@@ -15,9 +15,13 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
  * 02110-1301, USA.
+ *
+ * You can also choose to distribute this program under the terms of
+ * the Unmodified Binary Distribution Licence (as given in the file
+ * COPYING.UBDL), provided that you have satisfied its requirements.
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 #include <stdint.h>
 #include <string.h>
@@ -136,7 +140,8 @@ static int smbios_fetch ( struct settings *settings __unused,
 		 * is 2.6 or higher; we match this behaviour.
 		 */
 		raw = &buf[tag_offset];
-		if ( ( setting->type == &setting_type_uuid ) &&
+		if ( ( ( setting->type == &setting_type_uuid ) ||
+		       ( setting->type == &setting_type_guid ) ) &&
 		     ( tag_len == sizeof ( uuid ) ) &&
 		     ( smbios_version() >= SMBIOS_VERSION ( 2, 6 ) ) ) {
 			DBG ( "SMBIOS detected mangled UUID\n" );
@@ -238,6 +243,18 @@ const struct setting asset_setting __setting ( SETTING_HOST_EXTRA, asset ) = {
 	.tag = SMBIOS_STRING_TAG ( SMBIOS_TYPE_ENCLOSURE_INFORMATION,
 				   struct smbios_enclosure_information,
 				   asset_tag ),
+	.type = &setting_type_string,
+	.scope = &smbios_settings_scope,
+};
+
+/** Board serial number setting (may differ from chassis serial number) */
+const struct setting board_serial_setting __setting ( SETTING_HOST_EXTRA,
+						      board-serial ) = {
+	.name = "board-serial",
+	.description = "Base board serial",
+	.tag = SMBIOS_STRING_TAG ( SMBIOS_TYPE_BASE_BOARD_INFORMATION,
+				   struct smbios_base_board_information,
+				   serial ),
 	.type = &setting_type_string,
 	.scope = &smbios_settings_scope,
 };

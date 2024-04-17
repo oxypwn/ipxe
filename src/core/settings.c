@@ -15,9 +15,13 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
  * 02110-1301, USA.
+ *
+ * You can also choose to distribute this program under the terms of
+ * the Unmodified Binary Distribution Licence (as given in the file
+ * COPYING.UBDL), provided that you have satisfied its requirements.
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -27,6 +31,7 @@ FILE_LICENCE ( GPL2_OR_LATER );
 #include <byteswap.h>
 #include <errno.h>
 #include <assert.h>
+#include <time.h>
 #include <ipxe/in.h>
 #include <ipxe/ip.h>
 #include <ipxe/ipv6.h>
@@ -35,6 +40,7 @@ FILE_LICENCE ( GPL2_OR_LATER );
 #include <ipxe/uuid.h>
 #include <ipxe/uri.h>
 #include <ipxe/base16.h>
+#include <ipxe/base64.h>
 #include <ipxe/pci.h>
 #include <ipxe/init.h>
 #include <ipxe/version.h>
@@ -326,6 +332,7 @@ struct settings * autovivify_child_settings ( struct settings *parent,
 				&new_child->autovivified.refcnt );
 	settings = &new_child->autovivified.generic.settings;
 	register_settings ( settings, parent, new_child->name );
+	ref_put ( settings->refcnt );
 	return settings;
 }
 
@@ -337,17 +344,20 @@ struct settings * autovivify_child_settings ( struct settings *parent,
  */
 const char * settings_name ( struct settings *settings ) {
 	static char buf[16];
-	char tmp[ sizeof ( buf ) ];
+	char tmp[ 1 /* '.' */ + sizeof ( buf ) ];
 
 	/* Find target settings block */
 	settings = settings_target ( settings );
 
 	/* Construct name */
-	for ( buf[2] = buf[0] = 0 ; settings ; settings = settings->parent ) {
-		memcpy ( tmp, buf, sizeof ( tmp ) );
-		snprintf ( buf, sizeof ( buf ), ".%s%s", settings->name, tmp );
+	buf[0] = '\0';
+	tmp[0] = '\0';
+	for ( ; settings->parent ; settings = settings->parent ) {
+		memcpy ( ( tmp + 1 ), buf, ( sizeof ( tmp ) - 1 ) );
+		snprintf ( buf, sizeof ( buf ), "%s%s", settings->name, tmp );
+		tmp[0] = '.';
 	}
-	return ( buf + 2 );
+	return buf;
 }
 
 /**
@@ -360,12 +370,14 @@ const char * settings_name ( struct settings *settings ) {
 static struct settings *
 parse_settings_name ( const char *name, get_child_settings_t get_child ) {
 	struct settings *settings = &settings_root;
-	char name_copy[ strlen ( name ) + 1 ];
+	char *name_copy;
 	char *subname;
 	char *remainder;
 
 	/* Create modifiable copy of name */
-	memcpy ( name_copy, name, sizeof ( name_copy ) );
+	name_copy = strdup ( name );
+	if ( ! name_copy )
+		return NULL;
 	remainder = name_copy;
 
 	/* Parse each name component in turn */
@@ -378,6 +390,9 @@ parse_settings_name ( const char *name, get_child_settings_t get_child ) {
 		if ( ! settings )
 			break;
 	}
+
+	/* Free modifiable copy of name */
+	free ( name_copy );
 
 	return settings;
 }
@@ -396,9 +411,8 @@ struct settings * find_settings ( const char *name ) {
 /**
  * Apply all settings
  *
- * @ret rc		Return status code
  */
-static int apply_settings ( void ) {
+static void apply_settings ( void ) {
 	struct settings_applicator *applicator;
 	int rc;
 
@@ -407,11 +421,9 @@ static int apply_settings ( void ) {
 		if ( ( rc = applicator->apply() ) != 0 ) {
 			DBG ( "Could not apply settings using applicator "
 			      "%p: %s\n", applicator, strerror ( rc ) );
-			return rc;
+			/* Continue to apply remaining settings */
 		}
 	}
-
-	return 0;
 }
 
 /**
@@ -442,6 +454,8 @@ static void reprioritise_settings ( struct settings *settings ) {
 	list_for_each_entry ( tmp, &parent->children, siblings ) {
 		tmp_priority = fetch_intz_setting ( tmp, &priority_setting );
 		if ( priority > tmp_priority )
+			break;
+		if ( settings->order > tmp->order )
 			break;
 	}
 	list_add_tail ( &settings->siblings, &tmp->siblings );
@@ -499,10 +513,10 @@ int register_settings ( struct settings *settings, struct settings *parent,
  */
 void unregister_settings ( struct settings *settings ) {
 	struct settings *child;
-	struct settings *tmp;
 
 	/* Unregister child settings */
-	list_for_each_entry_safe ( child, tmp, &settings->children, siblings ) {
+	while ( ( child = list_first_entry ( &settings->children,
+					     struct settings, siblings ) ) ) {
 		unregister_settings ( child );
 	}
 
@@ -627,8 +641,7 @@ int store_setting ( struct settings *settings, const struct setting *setting,
 	 */
 	for ( ; settings ; settings = settings->parent ) {
 		if ( settings == &settings_root ) {
-			if ( ( rc = apply_settings() ) != 0 )
-				return rc;
+			apply_settings();
 			break;
 		}
 	}
@@ -1466,9 +1479,9 @@ struct setting * find_setting ( const char *name ) {
  * @v name		Name
  * @ret tag		Tag number, or 0 if not a valid number
  */
-static unsigned int parse_setting_tag ( const char *name ) {
+static uint64_t parse_setting_tag ( const char *name ) {
 	char *tmp = ( ( char * ) name );
-	unsigned int tag = 0;
+	uint64_t tag = 0;
 
 	while ( 1 ) {
 		tag = ( ( tag << 8 ) | strtoul ( tmp, &tmp, 0 ) );
@@ -1669,18 +1682,8 @@ const struct setting_type setting_type_string __setting_type = {
  */
 static int parse_uristring_setting ( const struct setting_type *type __unused,
 				     const char *value, void *buf, size_t len ){
-	char tmp[ len + 1 /* NUL */ ];
-	size_t raw_len;
 
-	/* Decode to temporary buffer (including NUL) */
-	raw_len = uri_decode ( value, tmp, sizeof ( tmp ) );
-
-	/* Copy to output buffer (excluding NUL) */
-	if ( len > raw_len )
-		len = raw_len;
-	memcpy ( buf, tmp, len );
-
-	return raw_len;
+	return uri_decode ( value, buf, len );
 }
 
 /**
@@ -1696,14 +1699,8 @@ static int parse_uristring_setting ( const struct setting_type *type __unused,
 static int format_uristring_setting ( const struct setting_type *type __unused,
 				      const void *raw, size_t raw_len,
 				      char *buf, size_t len ) {
-	char tmp[ raw_len + 1 /* NUL */ ];
 
-	/* Copy to temporary buffer and terminate */
-	memcpy ( tmp, raw, raw_len );
-	tmp[raw_len] = '\0';
-
-	/* Encode directly into output buffer */
-	return uri_encode ( tmp, buf, len, URI_FRAGMENT );
+	return uri_encode ( 0, raw, raw_len, buf, len );
 }
 
 /** A URI-encoded string setting type */
@@ -1792,7 +1789,7 @@ const struct setting_type setting_type_ipv6 __setting_type = {
 };
 
 /** IPv6 settings scope */
-const struct settings_scope ipv6_scope;
+const struct settings_scope dhcpv6_scope;
 
 /**
  * Integer setting type indices
@@ -2043,32 +2040,6 @@ const struct setting_type setting_type_uint32 __setting_type =
 	SETTING_TYPE_UINT ( SETTING_TYPE_INT32 );
 
 /**
- * Format hex string setting value
- *
- * @v delimiter		Byte delimiter
- * @v raw		Raw setting value
- * @v raw_len		Length of raw setting value
- * @v buf		Buffer to contain formatted value
- * @v len		Length of buffer
- * @ret len		Length of formatted value, or negative error
- */
-static int format_hex_setting ( const char *delimiter, const void *raw,
-				size_t raw_len, char *buf, size_t len ) {
-	const uint8_t *bytes = raw;
-	int used = 0;
-	unsigned int i;
-
-	if ( len )
-		buf[0] = 0; /* Ensure that a terminating NUL exists */
-	for ( i = 0 ; i < raw_len ; i++ ) {
-		used += ssnprintf ( ( buf + used ), ( len - used ),
-				    "%s%02x", ( used ? delimiter : "" ),
-				    bytes[i] );
-	}
-	return used;
-}
-
-/**
  * Parse hex string setting value (using colon delimiter)
  *
  * @v type		Setting type
@@ -2080,7 +2051,7 @@ static int format_hex_setting ( const char *delimiter, const void *raw,
  */
 static int parse_hex_setting ( const struct setting_type *type __unused,
 			       const char *value, void *buf, size_t len ) {
-	return hex_decode ( value, ':', buf, len );
+	return hex_decode ( ':', value, buf, len );
 }
 
 /**
@@ -2096,7 +2067,7 @@ static int parse_hex_setting ( const struct setting_type *type __unused,
 static int format_hex_colon_setting ( const struct setting_type *type __unused,
 				      const void *raw, size_t raw_len,
 				      char *buf, size_t len ) {
-	return format_hex_setting ( ":", raw, raw_len, buf, len );
+	return hex_encode ( ':', raw, raw_len, buf, len );
 }
 
 /**
@@ -2112,7 +2083,7 @@ static int format_hex_colon_setting ( const struct setting_type *type __unused,
 static int parse_hex_hyphen_setting ( const struct setting_type *type __unused,
 				      const char *value, void *buf,
 				      size_t len ) {
-	return hex_decode ( value, '-', buf, len );
+	return hex_decode ( '-', value, buf, len );
 }
 
 /**
@@ -2128,7 +2099,7 @@ static int parse_hex_hyphen_setting ( const struct setting_type *type __unused,
 static int format_hex_hyphen_setting ( const struct setting_type *type __unused,
 				       const void *raw, size_t raw_len,
 				       char *buf, size_t len ) {
-	return format_hex_setting ( "-", raw, raw_len, buf, len );
+	return hex_encode ( '-', raw, raw_len, buf, len );
 }
 
 /**
@@ -2143,7 +2114,7 @@ static int format_hex_hyphen_setting ( const struct setting_type *type __unused,
  */
 static int parse_hex_raw_setting ( const struct setting_type *type __unused,
 				   const char *value, void *buf, size_t len ) {
-	return hex_decode ( value, 0, buf, len );
+	return hex_decode ( 0, value, buf, len );
 }
 
 /**
@@ -2159,7 +2130,7 @@ static int parse_hex_raw_setting ( const struct setting_type *type __unused,
 static int format_hex_raw_setting ( const struct setting_type *type __unused,
 				    const void *raw, size_t raw_len,
 				    char *buf, size_t len ) {
-	return format_hex_setting ( "", raw, raw_len, buf, len );
+	return hex_encode ( 0, raw, raw_len, buf, len );
 }
 
 /** A hex-string setting (colon-delimited) */
@@ -2184,7 +2155,23 @@ const struct setting_type setting_type_hexraw __setting_type = {
 };
 
 /**
- * Format UUID setting value
+ * Parse Base64-encoded setting value
+ *
+ * @v type		Setting type
+ * @v value		Formatted setting value
+ * @v buf		Buffer to contain raw value
+ * @v len		Length of buffer
+ * @v size		Integer size, in bytes
+ * @ret len		Length of raw value, or negative error
+ */
+static int parse_base64_setting ( const struct setting_type *type __unused,
+				  const char *value, void *buf, size_t len ) {
+
+	return base64_decode ( value, buf, len );
+}
+
+/**
+ * Format Base64-encoded setting value
  *
  * @v type		Setting type
  * @v raw		Raw setting value
@@ -2193,22 +2180,92 @@ const struct setting_type setting_type_hexraw __setting_type = {
  * @v len		Length of buffer
  * @ret len		Length of formatted value, or negative error
  */
-static int format_uuid_setting ( const struct setting_type *type __unused,
+static int format_base64_setting ( const struct setting_type *type __unused,
+				   const void *raw, size_t raw_len,
+				   char *buf, size_t len ) {
+
+	return base64_encode ( raw, raw_len, buf, len );
+}
+
+/** A Base64-encoded setting */
+const struct setting_type setting_type_base64 __setting_type = {
+	.name = "base64",
+	.parse = parse_base64_setting,
+	.format = format_base64_setting,
+};
+
+/**
+ * Parse UUID/GUID setting value
+ *
+ * @v type		Setting type
+ * @v value		Formatted setting value
+ * @v buf		Buffer to contain raw value
+ * @v len		Length of buffer
+ * @v size		Integer size, in bytes
+ * @ret len		Length of raw value, or negative error
+ */
+static int parse_uuid_setting ( const struct setting_type *type,
+				const char *value, void *buf, size_t len ) {
+	union uuid uuid;
+	int rc;
+
+	/* Parse UUID */
+	if ( ( rc = uuid_aton ( value, &uuid ) ) != 0 )
+		return rc;
+
+	/* Mangle GUID byte ordering */
+	if ( type == &setting_type_guid )
+		uuid_mangle ( &uuid );
+
+	/* Copy value */
+	if ( len > sizeof ( uuid ) )
+		len = sizeof ( uuid );
+	memcpy ( buf, uuid.raw, len );
+
+	return ( sizeof ( uuid ) );
+}
+
+/**
+ * Format UUID/GUID setting value
+ *
+ * @v type		Setting type
+ * @v raw		Raw setting value
+ * @v raw_len		Length of raw setting value
+ * @v buf		Buffer to contain formatted value
+ * @v len		Length of buffer
+ * @ret len		Length of formatted value, or negative error
+ */
+static int format_uuid_setting ( const struct setting_type *type,
 				 const void *raw, size_t raw_len, char *buf,
 				 size_t len ) {
-	const union uuid *uuid = raw;
+	union uuid uuid;
 
 	/* Range check */
-	if ( raw_len != sizeof ( *uuid ) )
+	if ( raw_len != sizeof ( uuid ) )
 		return -ERANGE;
 
+	/* Copy value */
+	memcpy ( &uuid, raw, sizeof ( uuid ) );
+
+	/* Mangle GUID byte ordering */
+	if ( type == &setting_type_guid )
+		uuid_mangle ( &uuid );
+
 	/* Format value */
-	return snprintf ( buf, len, "%s", uuid_ntoa ( uuid ) );
+	return snprintf ( buf, len, "%s", uuid_ntoa ( &uuid ) );
 }
 
 /** UUID setting type */
 const struct setting_type setting_type_uuid __setting_type = {
 	.name = "uuid",
+	.parse = parse_uuid_setting,
+	.format = format_uuid_setting,
+};
+
+/** GUID setting type */
+const struct setting_type setting_type_guid __setting_type = {
+	.name = "guid",
+	.parse = parse_uuid_setting,
 	.format = format_uuid_setting,
 };
 
@@ -2226,6 +2283,10 @@ static int format_busdevfn_setting ( const struct setting_type *type __unused,
 				     const void *raw, size_t raw_len, char *buf,
 				     size_t len ) {
 	unsigned long busdevfn;
+	unsigned int seg;
+	unsigned int bus;
+	unsigned int slot;
+	unsigned int func;
 	int check_len;
 
 	/* Extract numeric value */
@@ -2234,9 +2295,14 @@ static int format_busdevfn_setting ( const struct setting_type *type __unused,
 		return check_len;
 	assert ( check_len == ( int ) raw_len );
 
+	/* Extract PCI address components */
+	seg = PCI_SEG ( busdevfn );
+	bus = PCI_BUS ( busdevfn );
+	slot = PCI_SLOT ( busdevfn );
+	func = PCI_FUNC ( busdevfn );
+
 	/* Format value */
-	return snprintf ( buf, len, "%02lx:%02lx.%lx", PCI_BUS ( busdevfn ),
-			  PCI_SLOT ( busdevfn ), PCI_FUNC ( busdevfn ) );
+	return snprintf ( buf, len, "%04x:%02x:%02x.%x", seg, bus, slot, func );
 }
 
 /** PCI bus:dev.fn setting type */
@@ -2377,6 +2443,15 @@ const struct setting root_path_setting __setting ( SETTING_SANBOOT, root-path)={
 	.type = &setting_type_string,
 };
 
+/** SAN filename setting */
+const struct setting san_filename_setting __setting ( SETTING_SANBOOT,
+						      san-filename ) = {
+	.name = "san-filename",
+	.description = "SAN filename",
+	.tag = DHCP_EB_SAN_FILENAME,
+	.type = &setting_type_string,
+};
+
 /** Username setting */
 const struct setting username_setting __setting ( SETTING_AUTH, username ) = {
 	.name = "username",
@@ -2407,6 +2482,15 @@ const struct setting user_class_setting __setting ( SETTING_HOST_EXTRA,
 	.name = "user-class",
 	.description = "DHCP user class",
 	.tag = DHCP_USER_CLASS_ID,
+	.type = &setting_type_string,
+};
+
+/** DHCP vendor class setting */
+const struct setting vendor_class_setting __setting ( SETTING_HOST_EXTRA,
+						      vendor-class ) = {
+	.name = "vendor-class",
+	.description = "DHCP vendor class",
+	.tag = DHCP_VENDOR_CLASS_ID,
 	.type = &setting_type_string,
 };
 
@@ -2532,6 +2616,145 @@ const struct setting version_setting __setting ( SETTING_MISC, version ) = {
 struct builtin_setting version_builtin_setting __builtin_setting = {
 	.setting = &version_setting,
 	.fetch = version_fetch,
+};
+
+/**
+ * Fetch current time setting
+ *
+ * @v data		Buffer to fill with setting data
+ * @v len		Length of buffer
+ * @ret len		Length of setting data, or negative error
+ */
+static int unixtime_fetch ( void *data, size_t len ) {
+	uint32_t content;
+
+	/* Return current time */
+	content = htonl ( time(NULL) );
+	if ( len > sizeof ( content ) )
+		len = sizeof ( content );
+	memcpy ( data, &content, len );
+	return sizeof ( content );
+}
+
+/** Current time setting */
+const struct setting unixtime_setting __setting ( SETTING_MISC, unixtime ) = {
+	.name = "unixtime",
+	.description = "Seconds since the Epoch",
+	.type = &setting_type_uint32,
+	.scope = &builtin_scope,
+};
+
+/** Current time built-in setting */
+struct builtin_setting unixtime_builtin_setting __builtin_setting = {
+	.setting = &unixtime_setting,
+	.fetch = unixtime_fetch,
+};
+
+/**
+ * Fetch current working URI-related setting
+ *
+ * @v data		Buffer to fill with setting data
+ * @v len		Length of buffer
+ * @v rel		Relative URI string
+ * @ret len		Length of setting data, or negative error
+ */
+static int cwuri_fetch_uri ( void *data, size_t len, const char *rel ) {
+	struct uri *reluri;
+	struct uri *uri;
+	char *uristring;
+	int ret;
+
+	/* Check that current working URI is set */
+	if ( ! cwuri ) {
+		ret = -ENOENT;
+		goto err_unset;
+	}
+
+	/* Construct relative URI */
+	reluri = parse_uri ( rel );
+	if ( ! reluri ) {
+		ret = -ENOMEM;
+		goto err_parse;
+	}
+
+	/* Construct resolved URI */
+	uri = resolve_uri ( cwuri, reluri );
+	if ( ! uri ) {
+		ret = -ENOMEM;
+		goto err_resolve;
+	}
+
+	/* Format URI string into allocated buffer (with NUL) */
+	uristring = format_uri_alloc ( uri );
+	if ( ! uristring ) {
+		ret = -ENOMEM;
+		goto err_format;
+	}
+
+	/* Copy URI string to buffer */
+	strncpy ( data, uristring, len );
+	ret = strlen ( uristring );
+
+	free ( uristring );
+ err_format:
+	uri_put ( uri );
+ err_resolve:
+	uri_put ( reluri );
+ err_parse:
+ err_unset:
+	return ret;
+}
+
+/**
+ * Fetch current working URI setting
+ *
+ * @v data		Buffer to fill with setting data
+ * @v len		Length of buffer
+ * @ret len		Length of setting data, or negative error
+ */
+static int cwuri_fetch ( void *data, size_t len ) {
+
+	return cwuri_fetch_uri ( data, len, "" );
+}
+
+/**
+ * Fetch current working directory URI setting
+ *
+ * @v data		Buffer to fill with setting data
+ * @v len		Length of buffer
+ * @ret len		Length of setting data, or negative error
+ */
+static int cwduri_fetch ( void *data, size_t len ) {
+
+	return cwuri_fetch_uri ( data, len, "." );
+}
+
+/** Current working URI setting */
+const struct setting cwuri_setting __setting ( SETTING_MISC, cwuri ) = {
+	.name = "cwuri",
+	.description = "Current working URI",
+	.type = &setting_type_string,
+	.scope = &builtin_scope,
+};
+
+/** Current working directory URI setting */
+const struct setting cwduri_setting __setting ( SETTING_MISC, cwduri ) = {
+	.name = "cwduri",
+	.description = "Current working directory URI",
+	.type = &setting_type_string,
+	.scope = &builtin_scope,
+};
+
+/** Current working URI built-in setting */
+struct builtin_setting cwuri_builtin_setting __builtin_setting = {
+	.setting = &cwuri_setting,
+	.fetch = cwuri_fetch,
+};
+
+/** Current working directory URI built-in setting */
+struct builtin_setting cwduri_builtin_setting __builtin_setting = {
+	.setting = &cwduri_setting,
+	.fetch = cwduri_fetch,
 };
 
 /**

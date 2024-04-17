@@ -15,9 +15,13 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
  * 02110-1301, USA.
+ *
+ * You can also choose to distribute this program under the terms of
+ * the Unmodified Binary Distribution Licence (as given in the file
+ * COPYING.UBDL), provided that you have satisfied its requirements.
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 /** @file
  *
@@ -58,9 +62,10 @@ static struct sockaddr_tcpip logserver = {
  * @v intf		Interface
  * @v rc		Reason for close
  */
-static void syslogs_close ( struct interface *intf __unused, int rc ) {
+static void syslogs_close ( struct interface *intf, int rc ) {
 
 	DBG ( "SYSLOGS console disconnected: %s\n", strerror ( rc ) );
+	intf_restart ( intf, rc );
 }
 
 /**
@@ -204,7 +209,6 @@ const struct setting syslogs_setting __setting ( SETTING_MISC, syslogs ) = {
 static int apply_syslogs_settings ( void ) {
 	static char *old_server;
 	char *server;
-	struct interface *socket;
 	int rc;
 
 	/* Fetch log server */
@@ -230,33 +234,32 @@ static int apply_syslogs_settings ( void ) {
 		rc = 0;
 		goto out_no_server;
 	}
-
-	/* Add TLS filter */
-	if ( ( rc = add_tls ( &syslogs, server, &socket ) ) != 0 ) {
-		DBG ( "SYSLOGS cannot create TLS filter: %s\n",
-		      strerror ( rc ) );
-		goto err_add_tls;
-	}
+	DBG ( "SYSLOGS using log server %s\n", server );
 
 	/* Connect to log server */
-	if ( ( rc = xfer_open_named_socket ( socket, SOCK_STREAM,
+	if ( ( rc = xfer_open_named_socket ( &syslogs, SOCK_STREAM,
 					     (( struct sockaddr *) &logserver ),
 					     server, NULL ) ) != 0 ) {
 		DBG ( "SYSLOGS cannot connect to log server: %s\n",
 		      strerror ( rc ) );
 		goto err_open_named_socket;
 	}
-	DBG ( "SYSLOGS using log server %s\n", server );
+
+	/* Add TLS filter */
+	if ( ( rc = add_tls ( &syslogs, server, NULL, NULL ) ) != 0 ) {
+		DBG ( "SYSLOGS cannot create TLS filter: %s\n",
+		      strerror ( rc ) );
+		goto err_add_tls;
+	}
 
 	/* Record log server */
 	old_server = server;
-	server = NULL;
 
-	/* Success */
-	rc = 0;
+	return 0;
 
- err_open_named_socket:
  err_add_tls:
+ err_open_named_socket:
+	syslogs_close ( &syslogs, rc );
  out_no_server:
  out_no_change:
 	free ( server );

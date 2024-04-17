@@ -15,9 +15,13 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
  * 02110-1301, USA.
+ *
+ * You can also choose to distribute this program under the terms of
+ * the Unmodified Binary Distribution Licence (as given in the file
+ * COPYING.UBDL), provided that you have satisfied its requirements.
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 /** @file
  *
@@ -38,8 +42,9 @@ FILE_LICENCE ( GPL2_OR_LATER );
 /**
  * Generate entropy samples for external testing
  *
+ * @v source		Entropy source
  */
-static void entropy_sample_test_exec ( void ) {
+static void entropy_sample ( struct entropy_source *source ) {
 	static noise_sample_t samples[SAMPLE_BLOCKSIZE];
 	unsigned int i;
 	unsigned int j;
@@ -49,19 +54,32 @@ static void entropy_sample_test_exec ( void ) {
 	for ( i = 0 ; i < ( SAMPLE_COUNT / SAMPLE_BLOCKSIZE ) ; i++ ) {
 
 		/* Collect one block of samples */
-		rc = entropy_enable();
+		rc = entropy_enable ( source );
 		ok ( rc == 0 );
 		for ( j = 0 ; j < SAMPLE_BLOCKSIZE ; j++ ) {
-			rc = get_noise ( &samples[j] );
+			rc = get_noise ( source, &samples[j] );
 			ok ( rc == 0 );
 		}
-		entropy_disable();
+		entropy_disable ( source );
 
 		/* Print out sample values */
 		for ( j = 0 ; j < SAMPLE_BLOCKSIZE ; j++ ) {
-			printf ( "SAMPLE %d %d\n", ( i * SAMPLE_BLOCKSIZE + j ),
-				 samples[j] );
+			printf ( "SAMPLE %s %d %d\n", source->name,
+				 ( i * SAMPLE_BLOCKSIZE + j ), samples[j] );
 		}
+	}
+}
+
+/**
+ * Generate entropy samples for external testing
+ *
+ */
+static void entropy_sample_test_exec ( void ) {
+	struct entropy_source *source;
+
+	/* Test each entropy source */
+	for_each_table_entry ( source, ENTROPY_SOURCES ) {
+		entropy_sample ( source );
 	}
 }
 

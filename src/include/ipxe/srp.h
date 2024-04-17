@@ -774,7 +774,7 @@ struct srp_aer_rsp {
  * The working draft specification for the SRP boot firmware table can
  * be found at
  *
- *   http://ipxe.org/wiki/srp/sbft
+ *   https://ipxe.org/wiki/srp/sbft
  *
  *****************************************************************************
  */
@@ -790,7 +790,7 @@ typedef uint16_t sbft_off_t;
  */
 struct sbft_table {
 	/** ACPI header */
-	struct acpi_description_header acpi;
+	struct acpi_header acpi;
 	/** Offset to SCSI subtable */
 	sbft_off_t scsi_offset;
 	/** Offset to SRP subtable */

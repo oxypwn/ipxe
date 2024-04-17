@@ -246,7 +246,7 @@ pcnet32_setup_rx_resources ( struct pcnet32_private *priv )
 {
 	DBGP ( "pcnet32_setup_rx_resources\n" );
 
-	priv->rx_base = malloc_dma ( RX_RING_BYTES, RX_RING_ALIGN );
+	priv->rx_base = malloc_phys ( RX_RING_BYTES, RX_RING_ALIGN );
 
 	DBG ( "priv->rx_base = %#08lx\n", virt_to_bus ( priv->rx_base ) );
 
@@ -270,7 +270,7 @@ pcnet32_free_rx_resources ( struct pcnet32_private *priv )
 
 	DBGP ( "pcnet32_free_rx_resources\n" );
 
-	free_dma ( priv->rx_base, RX_RING_BYTES );
+	free_phys ( priv->rx_base, RX_RING_BYTES );
 
 	for ( i = 0; i < RX_RING_SIZE; i++ ) {
 		free_iob ( priv->rx_iobuf[i] );
@@ -290,7 +290,7 @@ pcnet32_setup_tx_resources ( struct pcnet32_private *priv )
 {
 	DBGP ( "pcnet32_setup_tx_resources\n" );
 
-	priv->tx_base = malloc_dma ( TX_RING_BYTES, TX_RING_ALIGN );
+	priv->tx_base = malloc_phys ( TX_RING_BYTES, TX_RING_ALIGN );
 
 	if ( ! priv->tx_base ) {
 		return -ENOMEM;
@@ -312,7 +312,7 @@ pcnet32_free_tx_resources ( struct pcnet32_private *priv )
 {
 	DBGP ( "pcnet32_free_tx_resources\n" );
 
-	free_dma ( priv->tx_base, TX_RING_BYTES );
+	free_phys ( priv->tx_base, TX_RING_BYTES );
 }
 
 static int
@@ -414,8 +414,7 @@ pcnet32_chip_detect ( struct pcnet32_private *priv )
 	if (fset) {
 		a->write_bcr ( ioaddr, 18,
 			( a->read_bcr ( ioaddr, 18 ) | 0x0860 ) );
-		a->write_csr ( ioaddr, 80,
-			( a->read_csr ( ioaddr, 80 ) & 0x0C00) | 0x0C00 );
+		a->write_csr ( ioaddr, 80, 0x0c00 );
 	}
 
 	priv->full_duplex = fdx;
@@ -691,7 +690,7 @@ pcnet32_hw_start ( struct pcnet32_private *priv )
 static int
 pcnet32_open ( struct net_device *netdev )
 {
-	struct pcnet32_private *priv = netdev_priv ( netdev );
+	struct pcnet32_private *priv = netdev->priv;
 	unsigned long ioaddr = priv->pci_dev->ioaddr;
 	int rc;
 	u16 val;
@@ -755,7 +754,7 @@ err_setup_tx:
 static int
 pcnet32_transmit ( struct net_device *netdev, struct io_buffer *iobuf )
 {
-	struct pcnet32_private *priv = netdev_priv ( netdev );
+	struct pcnet32_private *priv = netdev->priv;
 	unsigned long ioaddr = priv->pci_dev->ioaddr;
 	uint32_t tx_len = iob_len ( iobuf );
 	struct pcnet32_tx_desc *tx_curr_desc;
@@ -803,7 +802,7 @@ pcnet32_transmit ( struct net_device *netdev, struct io_buffer *iobuf )
 static void
 pcnet32_process_tx_packets ( struct net_device *netdev )
 {
-	struct pcnet32_private *priv = netdev_priv ( netdev );
+	struct pcnet32_private *priv = netdev->priv;
 	struct pcnet32_tx_desc *tx_curr_desc;
 
 	DBGP ( "pcnet32_process_tx_packets\n" );
@@ -849,7 +848,7 @@ pcnet32_process_tx_packets ( struct net_device *netdev )
 static void
 pcnet32_process_rx_packets ( struct net_device *netdev )
 {
-	struct pcnet32_private *priv = netdev_priv ( netdev );
+	struct pcnet32_private *priv = netdev->priv;
 	struct pcnet32_rx_desc *rx_curr_desc;
 	u16 status;
 	u32 len;
@@ -914,7 +913,7 @@ pcnet32_process_rx_packets ( struct net_device *netdev )
 static void
 pcnet32_poll ( struct net_device *netdev )
 {
-	struct pcnet32_private *priv = netdev_priv ( netdev );
+	struct pcnet32_private *priv = netdev->priv;
 	unsigned long ioaddr = priv->pci_dev->ioaddr;
 	u16 status;
 
@@ -947,7 +946,7 @@ pcnet32_poll ( struct net_device *netdev )
 static void
 pcnet32_close ( struct net_device *netdev )
 {
-	struct pcnet32_private *priv = netdev_priv ( netdev );
+	struct pcnet32_private *priv = netdev->priv;
 	unsigned long ioaddr = priv->pci_dev->ioaddr;
 
 	DBGP ( "pcnet32_close\n" );
@@ -1004,7 +1003,7 @@ static void pcnet32_irq_disable ( struct pcnet32_private *priv )
 static void
 pcnet32_irq ( struct net_device *netdev, int action )
 {
-	struct pcnet32_private *priv = netdev_priv ( netdev );
+	struct pcnet32_private *priv = netdev->priv;
 
 	DBGP ( "pcnet32_irq\n" );
 
@@ -1062,7 +1061,7 @@ pcnet32_probe ( struct pci_device *pdev )
 	netdev->dev = &pdev->dev;
 
 	/* Get a reference to our private data */
-	priv = netdev_priv ( netdev );
+	priv = netdev->priv;
 
 	/* We'll need these set up for the rest of the routines */
 	priv->pci_dev = pdev;
@@ -1150,8 +1149,8 @@ pcnet32_remove ( struct pci_device *pdev )
 
 static struct pci_device_id pcnet32_nics[] = {
 	PCI_ROM(0x1022, 0x2000, "pcnet32", "AMD PCnet/PCI", 0),
-	PCI_ROM(0x1022, 0x2625, "pcnetfastiii", "AMD PCNet FAST III", 0),
 	PCI_ROM(0x1022, 0x2001, "amdhomepna", "AMD PCnet/HomePNA", 0),
+	PCI_ROM(0x1022, 0x2625, "pcnetfastiii", "AMD PCNet FAST III", 0),
 };
 
 struct pci_driver pcnet32_driver __pci_driver = {

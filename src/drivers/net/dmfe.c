@@ -462,7 +462,7 @@ static int dmfe_probe ( struct nic *nic, struct pci_device *pci ) {
 	       pci->id->name, pci->vendor, pci->device);
 
 	/* Read Chip revision */
-	pci_read_config_dword(pci, PCI_REVISION_ID, &dev_rev);
+	pci_read_config_dword(pci, PCI_REVISION, &dev_rev);
 	dprintf(("Revision %lX\n", dev_rev));
 
 	/* point to private storage */
@@ -1208,9 +1208,9 @@ static struct nic_operations dmfe_operations = {
 };
 
 static struct pci_device_id dmfe_nics[] = {
+	PCI_ROM(0x1282, 0x9009, "dmfe9009", "Davicom 9009", 0),
 	PCI_ROM(0x1282, 0x9100, "dmfe9100", "Davicom 9100", 0),
 	PCI_ROM(0x1282, 0x9102, "dmfe9102", "Davicom 9102", 0),
-	PCI_ROM(0x1282, 0x9009, "dmfe9009", "Davicom 9009", 0),
 	PCI_ROM(0x1282, 0x9132, "dmfe9132", "Davicom 9132", 0),	/* Needs probably some fixing */
 };
 

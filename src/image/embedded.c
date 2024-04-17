@@ -6,7 +6,7 @@
  * fetching over the network.
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 #include <string.h>
 #include <ipxe/image.h>
@@ -18,7 +18,7 @@ FILE_LICENCE ( GPL2_OR_LATER );
 #define EMBED( _index, _path, _name )					\
 	extern char embedded_image_ ## _index ## _data[];		\
 	extern char embedded_image_ ## _index ## _len[];		\
-	__asm__ ( ".section \".rodata\", \"a\", @progbits\n\t"		\
+	__asm__ ( ".section \".rodata\", \"a\", " PROGBITS "\n\t"	\
 		  "\nembedded_image_" #_index "_data:\n\t"		\
 		  ".incbin \"" _path "\"\n\t"				\
 		  "\nembedded_image_" #_index "_end:\n\t"		\
@@ -83,6 +83,9 @@ static void embedded_init ( void ) {
 		      image->name, strerror ( rc ) );
 		return;
 	}
+
+	/* Trust the selected image implicitly */
+	image_trust ( image );
 }
 
 /** Embedded image initialisation function */

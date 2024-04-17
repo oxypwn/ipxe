@@ -7,9 +7,10 @@
  *
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 #include <stddef.h>
+#include <stdarg.h>
 #include <ipxe/refcnt.h>
 
 /** An object interface operation */
@@ -33,6 +34,21 @@ struct interface_operation {
 		.func = ( ( ( ( typeof ( op_func ) * ) NULL ) ==	      \
 			    ( ( op_type ## _TYPE ( object_type ) * ) NULL ) ) \
 			  ? op_func : op_func ),			      \
+	}
+
+/**
+ * Define an unused object interface operation
+ *
+ * @v op_type		Operation type
+ * @v object_type	Implementing method's expected object type
+ * @v op_func		Implementing method
+ * @ret op		Object interface operation
+ */
+#define UNUSED_INTF_OP( op_type, object_type, op_func ) {		      \
+		.type = NULL,						      \
+		.func = ( ( ( ( typeof ( op_func ) * ) NULL ) ==	      \
+			    ( ( op_type ## _TYPE ( object_type ) * ) NULL ) ) \
+			  ? NULL : NULL ),				      \
 	}
 
 /** An object interface descriptor */
@@ -117,12 +133,30 @@ struct interface {
 	struct interface *dest;
 	/** Reference counter
 	 *
-	 * If this interface is not part of a reference-counted
-	 * object, this field may be NULL.
+	 * If this interface is not part of a reference-counted object
+	 * then this field is NULL.
 	 */
 	struct refcnt *refcnt;
-	/** Interface descriptor */
+	/** Interface descriptor
+	 *
+	 * If this is a temporary outbound-only interface created by
+	 * intf_temp_init() then this field is NULL.
+	 */
 	struct interface_descriptor *desc;
+	/** Original interface properties */
+	union {
+		/** Original interface descriptor
+		 *
+		 * Used by intf_reinit().
+		 */
+		struct interface_descriptor *desc;
+		/** Original interface
+		 *
+		 * Used for temporary outbound-only interfaces created
+		 * by intf_temp_init().
+		 */
+		struct interface *intf;
+	} original;
 };
 
 extern void intf_plug ( struct interface *intf, struct interface *dest );
@@ -143,7 +177,18 @@ extern void intf_close ( struct interface *intf, int rc );
 	typeof ( void ( object_type, int rc ) )
 
 extern void intf_shutdown ( struct interface *intf, int rc );
+extern void intfs_vshutdown ( va_list intfs, int rc );
+extern void intfs_shutdown ( int rc, ... ) __attribute__ (( sentinel ));
 extern void intf_restart ( struct interface *intf, int rc );
+extern void intfs_vrestart ( va_list intfs, int rc );
+extern void intfs_restart ( int rc, ... ) __attribute__ (( sentinel ));
+extern void intf_insert ( struct interface *intf, struct interface *upper,
+			  struct interface *lower );
+
+extern void intf_poke ( struct interface *intf,
+			void ( type ) ( struct interface *intf ) );
+#define intf_poke_TYPE( object_type ) \
+	typeof ( void ( object_type ) )
 
 extern struct interface_descriptor null_intf_desc;
 extern struct interface null_intf;
@@ -161,6 +206,7 @@ static inline void intf_init ( struct interface *intf,
 	intf->dest = &null_intf;
 	intf->refcnt = refcnt;
 	intf->desc = desc;
+	intf->original.desc = desc;
 }
 
 /**
@@ -168,11 +214,37 @@ static inline void intf_init ( struct interface *intf,
  *
  * @v descriptor	Object interface descriptor
  */
-#define INTF_INIT( descriptor ) {		\
-		.dest = &null_intf,		\
-		.refcnt = NULL,			\
-		.desc = &(descriptor),		\
+#define INTF_INIT( descriptor ) {					\
+		.dest = &null_intf,					\
+		.refcnt = NULL,						\
+		.desc = &(descriptor),					\
+		.original = {						\
+			.desc = &(descriptor),				\
+		},							\
 	}
+
+/**
+ * Initialise a temporary outbound-only object interface
+ *
+ * @v intf		Temporary outbound-only object interface
+ * @v original		Original object interface
+ */
+static inline void intf_temp_init ( struct interface *intf,
+				    struct interface *original ) {
+	intf->dest = &null_intf;
+	intf->desc = NULL;
+	intf->original.intf = original;
+}
+
+/**
+ * Get original interface
+ *
+ * @v intf		Object interface (possibly a temporary interface)
+ * @ret intf		Original object interface
+ */
+static inline struct interface * intf_origin ( struct interface *intf ) {
+	return ( intf->desc ? intf : intf->original.intf );
+}
 
 /**
  * Get object interface destination and operation method (without pass-through)
@@ -206,7 +278,7 @@ static inline void intf_init ( struct interface *intf,
  *
  * Use as the first argument to DBGC() or equivalent macro.
  */
-#define INTF_COL( intf ) intf_object ( intf )
+#define INTF_COL( intf ) intf_object ( intf_origin ( intf ) )
 
 /** printf() format string for INTF_DBG() */
 #define INTF_FMT "%p+%zx"
@@ -217,7 +289,9 @@ static inline void intf_init ( struct interface *intf,
  * @v intf		Object interface
  * @ret args		printf() argument list corresponding to INTF_FMT
  */
-#define INTF_DBG( intf ) intf_object ( intf ), (intf)->desc->offset
+#define INTF_DBG( intf )						\
+	intf_object ( intf_origin ( intf ) ),				\
+	intf_origin ( intf )->desc->offset
 
 /** printf() format string for INTF_INTF_DBG() */
 #define INTF_INTF_FMT INTF_FMT "->" INTF_FMT
@@ -230,5 +304,16 @@ static inline void intf_init ( struct interface *intf,
  * @ret args		printf() argument list corresponding to INTF_INTF_FMT
  */
 #define INTF_INTF_DBG( intf, dest ) INTF_DBG ( intf ), INTF_DBG ( dest )
+
+/**
+ * Reinitialise an object interface
+ *
+ * @v intf		Object interface
+ */
+static inline void intf_reinit ( struct interface *intf ) {
+
+	/* Restore original interface descriptor */
+	intf->desc = intf->original.desc;
+}
 
 #endif /* _IPXE_INTERFACE_H */

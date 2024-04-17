@@ -7,11 +7,12 @@
  *
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 #include <stdint.h>
 #include <ipxe/if_ether.h>
 #include <ipxe/nvs.h>
+#include <ipxe/dma.h>
 
 /** Intel BAR size */
 #define INTEL_BAR_SIZE ( 128 * 1024 )
@@ -22,33 +23,38 @@ struct intel_descriptor {
 	uint64_t address;
 	/** Length */
 	uint16_t length;
-	/** Reserved */
-	uint8_t reserved_a;
+	/** Flags */
+	uint8_t flags;
 	/** Command */
 	uint8_t command;
 	/** Status */
-	uint8_t status;
-	/** Errors */
-	uint8_t errors;
-	/** Reserved */
-	uint16_t reserved_b;
+	uint32_t status;
 } __attribute__ (( packed ));
 
-/** Packet descriptor command bits */
-enum intel_descriptor_command {
-	/** Report status */
-	INTEL_DESC_CMD_RS = 0x08,
-	/** Insert frame checksum (CRC) */
-	INTEL_DESC_CMD_IFCS = 0x02,
-	/** End of packet */
-	INTEL_DESC_CMD_EOP = 0x01,
-};
+/** Descriptor type */
+#define INTEL_DESC_FL_DTYP( dtyp ) ( (dtyp) << 4 )
+#define INTEL_DESC_FL_DTYP_DATA INTEL_DESC_FL_DTYP ( 0x03 )
 
-/** Packet descriptor status bits */
-enum intel_descriptor_status {
-	/** Descriptor done */
-	INTEL_DESC_STATUS_DD = 0x01,
-};
+/** Descriptor extension */
+#define INTEL_DESC_CMD_DEXT 0x20
+
+/** Report status */
+#define INTEL_DESC_CMD_RS 0x08
+
+/** Insert frame checksum (CRC) */
+#define INTEL_DESC_CMD_IFCS 0x02
+
+/** End of packet */
+#define INTEL_DESC_CMD_EOP 0x01
+
+/** Descriptor done */
+#define INTEL_DESC_STATUS_DD 0x00000001UL
+
+/** Receive error */
+#define INTEL_DESC_STATUS_RXE 0x00000100UL
+
+/** Payload length */
+#define INTEL_DESC_STATUS_PAYLEN( len ) ( (len) << 14 )
 
 /** Device Control Register */
 #define INTEL_CTRL 0x00000UL
@@ -91,9 +97,11 @@ enum intel_descriptor_status {
 /** Interrupt Cause Read Register */
 #define INTEL_ICR 0x000c0UL
 #define INTEL_IRQ_TXDW		0x00000001UL	/**< Transmit descriptor done */
+#define INTEL_IRQ_TXQE		0x00000002UL	/**< Transmit queue empty */
 #define INTEL_IRQ_LSC		0x00000004UL	/**< Link status change */
+#define INTEL_IRQ_RXDMT0	0x00000010UL	/**< Receive queue low */
+#define INTEL_IRQ_RXO		0x00000040UL	/**< Receive overrun */
 #define INTEL_IRQ_RXT0		0x00000080UL	/**< Receive timer */
-#define INTEL_IRQ_RXO		0x00000400UL	/**< Receive overrun */
 
 /** Interrupt Mask Set/Read Register */
 #define INTEL_IMS 0x000d0UL
@@ -130,6 +138,10 @@ enum intel_descriptor_status {
 /** Packet Buffer Size */
 #define INTEL_PBS 0x01008UL
 
+/** Receive packet buffer size */
+#define INTEL_RXPBS 0x02404UL
+#define INTEL_RXPBS_I210	0x000000a2UL	/**< I210 power-up default */
+
 /** Receive Descriptor register block */
 #define INTEL_RD 0x02800UL
 
@@ -138,13 +150,17 @@ enum intel_descriptor_status {
  * Minimum value is 8, since the descriptor ring length must be a
  * multiple of 128.
  */
-#define INTEL_NUM_RX_DESC 8
+#define INTEL_NUM_RX_DESC 16
 
 /** Receive descriptor ring fill level */
-#define INTEL_RX_FILL 4
+#define INTEL_RX_FILL 8
 
 /** Receive buffer length */
 #define INTEL_RX_MAX_LEN 2048
+
+/** Transmit packet buffer size */
+#define INTEL_TXPBS 0x03404UL
+#define INTEL_TXPBS_I210	0x04000014UL	/**< I210 power-up default */
 
 /** Transmit Descriptor register block */
 #define INTEL_TD 0x03800UL
@@ -155,6 +171,9 @@ enum intel_descriptor_status {
  * requires a minimum of 16 TX descriptors.
  */
 #define INTEL_NUM_TX_DESC 16
+
+/** Transmit descriptor ring maximum fill level */
+#define INTEL_TX_FILL ( INTEL_NUM_TX_DESC - 1 )
 
 /** Receive/Transmit Descriptor Base Address Low (offset) */
 #define INTEL_xDBAL 0x00
@@ -175,12 +194,19 @@ enum intel_descriptor_status {
 #define INTEL_xDCTL 0x28
 #define INTEL_xDCTL_ENABLE	0x02000000UL	/**< Queue enable */
 
+/** Maximum time to wait for queue disable, in milliseconds */
+#define INTEL_DISABLE_MAX_WAIT_MS 100
+
 /** Receive Address Low */
 #define INTEL_RAL0 0x05400UL
 
 /** Receive Address High */
 #define INTEL_RAH0 0x05404UL
 #define INTEL_RAH0_AV		0x80000000UL	/**< Address valid */
+
+/** Future Extended NVM register 11 */
+#define INTEL_FEXTNVM11 0x05bbcUL
+#define INTEL_FEXTNVM11_WTF	0x00002000UL	/**< Don't ask */
 
 /** Receive address */
 union intel_receive_address {
@@ -195,6 +221,8 @@ union intel_receive_address {
 struct intel_ring {
 	/** Descriptors */
 	struct intel_descriptor *desc;
+	/** Descriptor ring DMA mapping */
+	struct dma_mapping map;
 	/** Producer index */
 	unsigned int prod;
 	/** Consumer index */
@@ -204,6 +232,15 @@ struct intel_ring {
 	unsigned int reg;
 	/** Length (in bytes) */
 	size_t len;
+
+	/** Populate descriptor
+	 *
+	 * @v desc		Descriptor
+	 * @v addr		Data buffer address
+	 * @v len		Length of data
+	 */
+	void ( * describe ) ( struct intel_descriptor *desc, physaddr_t addr,
+			      size_t len );
 };
 
 /**
@@ -212,20 +249,53 @@ struct intel_ring {
  * @v ring		Descriptor ring
  * @v count		Number of descriptors
  * @v reg		Descriptor register block
+ * @v describe		Method to populate descriptor
  */
 static inline __attribute__ (( always_inline)) void
-intel_init_ring ( struct intel_ring *ring, unsigned int count,
-		  unsigned int reg ) {
+intel_init_ring ( struct intel_ring *ring, unsigned int count, unsigned int reg,
+		  void ( * describe ) ( struct intel_descriptor *desc,
+					physaddr_t addr, size_t len ) ) {
+
 	ring->len = ( count * sizeof ( ring->desc[0] ) );
 	ring->reg = reg;
+	ring->describe = describe;
+}
+
+/** An Intel virtual function mailbox */
+struct intel_mailbox {
+	/** Mailbox control register */
+	unsigned int ctrl;
+	/** Mailbox memory base */
+	unsigned int mem;
+};
+
+/**
+ * Initialise mailbox
+ *
+ * @v mbox		Mailbox
+ * @v ctrl		Mailbox control register
+ * @v mem		Mailbox memory register base
+ */
+static inline __attribute__ (( always_inline )) void
+intel_init_mbox ( struct intel_mailbox *mbox, unsigned int ctrl,
+		  unsigned int mem ) {
+
+	mbox->ctrl = ctrl;
+	mbox->mem = mem;
 }
 
 /** An Intel network card */
 struct intel_nic {
 	/** Registers */
 	void *regs;
+	/** DMA device */
+	struct dma_device *dma;
 	/** Port number (for multi-port devices) */
 	unsigned int port;
+	/** Flags */
+	unsigned int flags;
+	/** Forced interrupts */
+	unsigned int force_icr;
 
 	/** EEPROM */
 	struct nvs_device eeprom;
@@ -233,6 +303,9 @@ struct intel_nic {
 	uint32_t eerd_done;
 	/** EEPROM address shift */
 	unsigned int eerd_addr_shift;
+
+	/** Mailbox */
+	struct intel_mailbox mbox;
 
 	/** Transmit descriptor ring */
 	struct intel_ring tx;
@@ -242,6 +315,51 @@ struct intel_nic {
 	struct io_buffer *rx_iobuf[INTEL_NUM_RX_DESC];
 };
 
+/** Driver flags */
+enum intel_flags {
+	/** PBS/PBA errata workaround required */
+	INTEL_PBS_ERRATA = 0x0001,
+	/** VMware missing interrupt workaround required */
+	INTEL_VMWARE = 0x0002,
+	/** PHY reset is broken */
+	INTEL_NO_PHY_RST = 0x0004,
+	/** ASDE is broken */
+	INTEL_NO_ASDE = 0x0008,
+	/** Reset may cause a complete device hang */
+	INTEL_RST_HANG = 0x0010,
+	/** PBSIZE registers must be explicitly reset */
+	INTEL_PBSIZE_RST = 0x0020,
+};
+
+/** The i219 has a seriously broken reset mechanism */
+#define INTEL_I219 ( INTEL_NO_PHY_RST | INTEL_RST_HANG )
+
+/**
+ * Dump diagnostic information
+ *
+ * @v intel		Intel device
+ */
+static inline void intel_diag ( struct intel_nic *intel ) {
+
+	DBGC ( intel, "INTEL %p TX %04x(%02x)/%04x(%02x) "
+	       "RX %04x(%02x)/%04x(%02x)\n", intel,
+	       ( intel->tx.cons & 0xffff ),
+	       readl ( intel->regs + intel->tx.reg + INTEL_xDH ),
+	       ( intel->tx.prod & 0xffff ),
+	       readl ( intel->regs + intel->tx.reg + INTEL_xDT ),
+	       ( intel->rx.cons & 0xffff ),
+	       readl ( intel->regs + intel->rx.reg + INTEL_xDH ),
+	       ( intel->rx.prod & 0xffff ),
+	       readl ( intel->regs + intel->rx.reg + INTEL_xDT ) );
+}
+
+extern void intel_describe_tx ( struct intel_descriptor *tx,
+				physaddr_t addr, size_t len );
+extern void intel_describe_tx_adv ( struct intel_descriptor *tx,
+				    physaddr_t addr, size_t len );
+extern void intel_describe_rx ( struct intel_descriptor *rx,
+				physaddr_t addr, size_t len );
+extern void intel_reset_ring ( struct intel_nic *intel, unsigned int reg );
 extern int intel_create_ring ( struct intel_nic *intel,
 			       struct intel_ring *ring );
 extern void intel_destroy_ring ( struct intel_nic *intel,

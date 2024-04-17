@@ -37,7 +37,7 @@
 #include <ipxe/oncrpc_iob.h>
 #include <ipxe/init.h>
 #include <ipxe/settings.h>
-#include <config/general.h>
+#include <ipxe/version.h>
 
 /** @file
  *
@@ -88,7 +88,7 @@ int oncrpc_init_cred_sys ( struct oncrpc_cred_sys *auth_sys ) {
 	fetch_string_setting_copy ( NULL, &hostname_setting,
 	                            &auth_sys->hostname );
 	if ( ! auth_sys->hostname )
-		if ( ! ( auth_sys->hostname = strdup ( PRODUCT_SHORT_NAME ) ) )
+		if ( ! ( auth_sys->hostname = strdup ( product_short_name ) ) )
 			return -ENOMEM;
 
 	auth_sys->uid         = fetch_uintz_setting ( NULL, &uid_setting );
@@ -128,7 +128,6 @@ void oncrpc_init_session ( struct oncrpc_session *session,
 
 int oncrpc_call ( struct interface *intf, struct oncrpc_session *session,
                   uint32_t proc_name, const struct oncrpc_field fields[] ) {
-	int              rc;
 	size_t           frame_size;
 	struct io_buffer *io_buf;
 
@@ -161,11 +160,7 @@ int oncrpc_call ( struct interface *intf, struct oncrpc_session *session,
 	oncrpc_iob_add_fields ( io_buf, header );
 	oncrpc_iob_add_fields ( io_buf, fields );
 
-	rc = xfer_deliver_iob ( intf, io_buf );
-	if ( rc != 0 )
-		free_iob ( io_buf );
-
-	return rc;
+	return xfer_deliver_iob ( intf, iob_disown ( io_buf ) );
 }
 
 size_t oncrpc_compute_size ( const struct oncrpc_field fields[] ) {

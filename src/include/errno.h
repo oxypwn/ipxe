@@ -15,12 +15,16 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
  * 02110-1301, USA.
+ *
+ * You can also choose to distribute this program under the terms of
+ * the Unmodified Binary Distribution Licence (as given in the file
+ * COPYING.UBDL), provided that you have satisfied its requirements.
  */
 
 #ifndef ERRNO_H
 #define ERRNO_H
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 /** @file
  *
@@ -254,17 +258,17 @@ static inline void eplatform_discard ( int dummy __unused, ... ) {}
  * @ret error		Error
  */
 #define __einfo_error( einfo ) ( {					\
-	__asm__ ( ".section \".einfo\", \"\", @progbits\n\t"		\
-		  ".align 8\n\t"					\
+	__asm__ ( ".section \".einfo\", \"\", " PROGBITS_OPS "\n\t"	\
+		  ".balign 8\n\t"					\
 		  "\n1:\n\t"						\
 		  ".long ( 4f - 1b )\n\t"				\
-		  ".long %c0\n\t"					\
+		  ".long %" ASM_NO_PREFIX "0\n\t"			\
 		  ".long ( 2f - 1b )\n\t"				\
 		  ".long ( 3f - 1b )\n\t"				\
-		  ".long %c1\n\t"					\
+		  ".long %" ASM_NO_PREFIX "1\n\t"			\
 		  "\n2:\t.asciz \"" __einfo_desc ( einfo ) "\"\n\t"	\
 		  "\n3:\t.asciz \"" __FILE__ "\"\n\t"			\
-		  ".align 8\n\t"					\
+		  ".balign 8\n\t"					\
 		  "\n4:\n\t"						\
 		  ".previous\n\t" : :					\
 		  "i" ( __einfo_errno ( einfo ) ),			\

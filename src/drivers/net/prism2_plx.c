@@ -10,8 +10,18 @@ $Id$
 /*
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 2, or (at
- * your option) any later version.
+ * published by the Free Software Foundation; either version 2 of the
+ * License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ * 02110-1301, USA.
  */
 
 FILE_LICENCE ( GPL2_OR_LATER );
@@ -44,10 +54,10 @@ static int prism2_find_plx ( hfa384x_t *hw, struct pci_device *p )
   
   /* Obtain all memory and IO base addresses */
   pci_read_config_dword( p, PLX_LOCAL_CONFIG_REGISTER_BASE, &plx_lcr);
-  plx_lcr &= PCI_BASE_ADDRESS_IO_MASK;
+  plx_lcr &= ~PCI_BASE_ADDRESS_IO_MASK;
   pci_read_config_dword( p, PRISM2_PLX_ATTR_MEM_BASE, &attr_mem);
   pci_read_config_dword( p, PRISM2_PLX_IO_BASE, &iobase);
-  iobase &= PCI_BASE_ADDRESS_IO_MASK;
+  iobase &= ~PCI_BASE_ADDRESS_IO_MASK;
 
   /* Fill out hw structure */
   hw->iobase = iobase;
@@ -94,9 +104,10 @@ static void prism2_plx_disable ( struct nic *nic ) {
 }
 
 static struct pci_device_id prism2_plx_nics[] = {
-PCI_ROM(0x1385, 0x4100, "ma301",         "Netgear MA301", 0),
 PCI_ROM(0x10b7, 0x7770, "3c-airconnect", "3Com AirConnect", 0),
 PCI_ROM(0x111a, 0x1023, "ss1023",        "Siemens SpeedStream SS1023", 0),
+PCI_ROM(0x126c, 0x8030, "emobility",     "Nortel emobility", 0),
+PCI_ROM(0x1385, 0x4100, "ma301",         "Netgear MA301", 0),
 PCI_ROM(0x15e8, 0x0130, "correga",       "Correga", 0),
 PCI_ROM(0x1638, 0x1100, "smc2602w",      "SMC EZConnect SMC2602W", 0),	/* or Eumitcom PCI WL11000, Addtron AWA-100 */
 PCI_ROM(0x16ab, 0x1100, "gl24110p",      "Global Sun Tech GL24110P", 0),
@@ -104,7 +115,6 @@ PCI_ROM(0x16ab, 0x1101, "16ab-1101",     "Unknown", 0),
 PCI_ROM(0x16ab, 0x1102, "wdt11",         "Linksys WDT11", 0),
 PCI_ROM(0x16ec, 0x3685, "usr2415",       "USR 2415", 0),
 PCI_ROM(0xec80, 0xec00, "f5d6000",       "Belkin F5D6000", 0),
-PCI_ROM(0x126c, 0x8030, "emobility",     "Nortel emobility", 0),
 };
 
 PCI_DRIVER ( prism2_plx_driver, prism2_plx_nics, PCI_NO_CLASS );

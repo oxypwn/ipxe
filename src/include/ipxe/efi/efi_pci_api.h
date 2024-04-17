@@ -7,7 +7,7 @@
  *
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 #ifdef PCIAPI_EFI
 #define PCIAPI_PREFIX_efi
@@ -33,14 +33,17 @@ extern int efipci_write ( struct pci_device *pci, unsigned long location,
 			  unsigned long value );
 
 /**
- * Determine number of PCI buses within system
+ * Find next PCI bus:dev.fn address range in system
  *
- * @ret num_bus		Number of buses
+ * @v busdevfn		Starting PCI bus:dev.fn address
+ * @v range		PCI bus:dev.fn address range to fill in
  */
-static inline __always_inline int
-PCIAPI_INLINE ( efi, pci_num_bus ) ( void ) {
+static inline __always_inline void
+PCIAPI_INLINE ( efi, pci_discover ) ( uint32_t busdevfn __unused,
+				      struct pci_range *range ) {
+
 	/* EFI does not want us to scan the PCI bus ourselves */
-	return 0;
+	range->count = 0;
 }
 
 /**
@@ -55,6 +58,7 @@ static inline __always_inline int
 PCIAPI_INLINE ( efi, pci_read_config_byte ) ( struct pci_device *pci,
 					      unsigned int where,
 					      uint8_t *value ) {
+	*value = 0xff;
 	return efipci_read ( pci,
 			     EFIPCI_LOCATION ( where, EFIPCI_WIDTH_BYTE ),
 			     value );
@@ -72,6 +76,7 @@ static inline __always_inline int
 PCIAPI_INLINE ( efi, pci_read_config_word ) ( struct pci_device *pci,
 					      unsigned int where,
 					      uint16_t *value ) {
+	*value = 0xffff;
 	return efipci_read ( pci,
 			     EFIPCI_LOCATION ( where, EFIPCI_WIDTH_WORD ),
 			     value );
@@ -89,6 +94,7 @@ static inline __always_inline int
 PCIAPI_INLINE ( efi, pci_read_config_dword ) ( struct pci_device *pci,
 					       unsigned int where,
 					       uint32_t *value ) {
+	*value = 0xffffffffUL;
 	return efipci_read ( pci,
 			     EFIPCI_LOCATION ( where, EFIPCI_WIDTH_DWORD ),
 			     value );

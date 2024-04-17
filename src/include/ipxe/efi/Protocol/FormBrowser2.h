@@ -4,31 +4,22 @@
   The EFI_FORM_BROWSER2_PROTOCOL is the interface to call for drivers to
   leverage the EFI configuration driver interface.
 
-Copyright (c) 2006 - 2010, Intel Corporation. All rights reserved.<BR>
-This program and the accompanying materials are licensed and made available under
-the terms and conditions of the BSD License that accompanies this distribution.
-The full text of the license may be found at
-http://opensource.org/licenses/bsd-license.php.
-
-THE PROGRAM IS DISTRIBUTED UNDER THE BSD LICENSE ON AN "AS IS" BASIS,
-WITHOUT WARRANTIES OR REPRESENTATIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED.
+Copyright (c) 2006 - 2018, Intel Corporation. All rights reserved.<BR>
+SPDX-License-Identifier: BSD-2-Clause-Patent
 
 **/
 
 #ifndef __EFI_FORM_BROWSER2_H__
 #define __EFI_FORM_BROWSER2_H__
 
-FILE_LICENCE ( BSD3 );
+FILE_LICENCE ( BSD2_PATENT );
 
 #include <ipxe/efi/Guid/HiiPlatformSetupFormset.h>
 
 #define EFI_FORM_BROWSER2_PROTOCOL_GUID \
   {0xb9d4c360, 0xbcfb, 0x4f9b, {0x92, 0x98, 0x53, 0xc1, 0x36, 0x98, 0x22, 0x58 }}
 
-
-typedef struct _EFI_FORM_BROWSER2_PROTOCOL   EFI_FORM_BROWSER2_PROTOCOL;
-
-
+typedef struct _EFI_FORM_BROWSER2_PROTOCOL EFI_FORM_BROWSER2_PROTOCOL;
 
 /**
 
@@ -49,23 +40,24 @@ typedef struct _EFI_FORM_BROWSER2_PROTOCOL   EFI_FORM_BROWSER2_PROTOCOL;
                       window will end.
 **/
 typedef struct {
-  UINTN   LeftColumn;
-  UINTN   RightColumn;
-  UINTN   TopRow;
-  UINTN   BottomRow;
+  UINTN    LeftColumn;
+  UINTN    RightColumn;
+  UINTN    TopRow;
+  UINTN    BottomRow;
 } EFI_SCREEN_DESCRIPTOR;
 
 typedef UINTN EFI_BROWSER_ACTION_REQUEST;
 
-#define EFI_BROWSER_ACTION_REQUEST_NONE   0
-#define EFI_BROWSER_ACTION_REQUEST_RESET  1
-#define EFI_BROWSER_ACTION_REQUEST_SUBMIT 2
-#define EFI_BROWSER_ACTION_REQUEST_EXIT   3
-#define EFI_BROWSER_ACTION_REQUEST_FORM_SUBMIT_EXIT  4
-#define EFI_BROWSER_ACTION_REQUEST_FORM_DISCARD_EXIT 5
-#define EFI_BROWSER_ACTION_REQUEST_FORM_APPLY        6
-#define EFI_BROWSER_ACTION_REQUEST_FORM_DISCARD      7
-
+#define EFI_BROWSER_ACTION_REQUEST_NONE               0
+#define EFI_BROWSER_ACTION_REQUEST_RESET              1
+#define EFI_BROWSER_ACTION_REQUEST_SUBMIT             2
+#define EFI_BROWSER_ACTION_REQUEST_EXIT               3
+#define EFI_BROWSER_ACTION_REQUEST_FORM_SUBMIT_EXIT   4
+#define EFI_BROWSER_ACTION_REQUEST_FORM_DISCARD_EXIT  5
+#define EFI_BROWSER_ACTION_REQUEST_FORM_APPLY         6
+#define EFI_BROWSER_ACTION_REQUEST_FORM_DISCARD       7
+#define EFI_BROWSER_ACTION_REQUEST_RECONNECT          8
+#define EFI_BROWSER_ACTION_REQUEST_QUESTION_APPLY     9
 
 /**
   Initialize the browser to display the specified configuration forms.
@@ -84,7 +76,7 @@ typedef UINTN EFI_BROWSER_ACTION_REQUEST;
 
   @param FormSetGuid     This field points to the EFI_GUID which must match the Guid field or one of the
                          elements of the ClassId field  in the EFI_IFR_FORM_SET op-code.  If
-                         FormsetGuid is NULL, then this function will display the the form set class
+                         FormsetGuid is NULL, then this function will display the form set class
                          EFI_HII_PLATFORM_SETUP_FORMSET_GUID.
 
   @param FormId          This field specifies the identifier of the form within the form set to render as the first
@@ -109,12 +101,11 @@ EFI_STATUS
   IN CONST  EFI_FORM_BROWSER2_PROTOCOL  *This,
   IN        EFI_HII_HANDLE              *Handle,
   IN        UINTN                      HandleCount,
-  IN        EFI_GUID                   *FormSetGuid, OPTIONAL
-  IN        EFI_FORM_ID                FormId, OPTIONAL
-  IN CONST  EFI_SCREEN_DESCRIPTOR      *ScreenDimensions, OPTIONAL
+  IN        EFI_GUID                   *FormSetGuid  OPTIONAL,
+  IN        EFI_FORM_ID                FormId  OPTIONAL,
+  IN CONST  EFI_SCREEN_DESCRIPTOR      *ScreenDimensions  OPTIONAL,
   OUT       EFI_BROWSER_ACTION_REQUEST *ActionRequest  OPTIONAL
-);
-
+  );
 
 /**
   This function is called by a callback handler to retrieve uncommitted state data from the browser.
@@ -150,9 +141,12 @@ EFI_STATUS
   @retval EFI_SUCCESS           The results have been distributed or are
                                 awaiting distribution.
 
-  @retval EFI_OUT_OF_RESOURCES  The ResultsDataSize specified
+  @retval EFI_BUFFER_TOO_SMALL  The ResultsDataSize specified
                                 was too small to contain the
                                 results data.
+
+  @retval EFI_UNSUPPORTED       Uncommitted browser state is not available
+                                at the current stage of execution.
 
 **/
 typedef
@@ -162,20 +156,19 @@ EFI_STATUS
   IN OUT    UINTN                     *ResultsDataSize,
   IN OUT    EFI_STRING                ResultsData,
   IN CONST  BOOLEAN                   RetrieveData,
-  IN CONST  EFI_GUID                  *VariableGuid, OPTIONAL
+  IN CONST  EFI_GUID                  *VariableGuid  OPTIONAL,
   IN CONST  CHAR16                    *VariableName OPTIONAL
-);
+  );
 
 ///
 /// This interface will allow the caller to direct the configuration
 /// driver to use either the HII database or use the passed-in packet of data.
 ///
 struct _EFI_FORM_BROWSER2_PROTOCOL {
-  EFI_SEND_FORM2         SendForm;
-  EFI_BROWSER_CALLBACK2  BrowserCallback;
-} ;
+  EFI_SEND_FORM2           SendForm;
+  EFI_BROWSER_CALLBACK2    BrowserCallback;
+};
 
-extern EFI_GUID gEfiFormBrowser2ProtocolGuid;
+extern EFI_GUID  gEfiFormBrowser2ProtocolGuid;
 
 #endif
-

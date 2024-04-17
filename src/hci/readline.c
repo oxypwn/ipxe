@@ -15,9 +15,13 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
  * 02110-1301, USA.
+ *
+ * You can also choose to distribute this program under the terms of
+ * the Unmodified Binary Distribution Licence (as given in the file
+ * COPYING.UBDL), provided that you have satisfied its requirements.
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 #include <stdio.h>
 #include <string.h>
@@ -34,8 +38,6 @@ FILE_LICENCE ( GPL2_OR_LATER );
  *
  */
 
-#define READLINE_MAX 256
-
 /**
  * Synchronise console with edited string
  *
@@ -45,7 +47,8 @@ static void sync_console ( struct edit_string *string ) {
 	unsigned int mod_start = string->mod_start;
 	unsigned int mod_end = string->mod_end;
 	unsigned int cursor = string->last_cursor;
-	size_t len = strlen ( string->buf );
+	const char *buf = *(string->buf);
+	size_t len = strlen ( buf );
 
 	/* Expand region back to old cursor position if applicable */
 	if ( mod_start > string->last_cursor )
@@ -63,7 +66,7 @@ static void sync_console ( struct edit_string *string ) {
 
 	/* Print modified region */
 	while ( cursor < mod_end ) {
-		putchar ( ( cursor >= len ) ? ' ' : string->buf[cursor] );
+		putchar ( ( cursor >= len ) ? ' ' : buf[cursor] );
 		cursor++;
 	}
 
@@ -244,6 +247,7 @@ void history_free ( struct readline_history *history ) {
  * @v prompt		Prompt string
  * @v prefill		Prefill string, or NULL for no prefill
  * @v history		History buffer, or NULL for no history
+ * @v timeout		Timeout period, in ticks (0=indefinite)
  * @ret line		Line read from console (excluding terminating newline)
  * @ret rc		Return status code
  *
@@ -251,46 +255,53 @@ void history_free ( struct readline_history *history ) {
  * eventually call free() to release the storage.
  */
 int readline_history ( const char *prompt, const char *prefill,
-		       struct readline_history *history, char **line ) {
-	char buf[READLINE_MAX];
+		       struct readline_history *history, unsigned long timeout,
+		       char **line ) {
 	struct edit_string string;
 	int key;
 	int move_by;
 	const char *new_string;
 	int rc;
 
-	/* Avoid returning uninitialised data on error */
-	*line = NULL;
-
 	/* Display prompt, if applicable */
 	if ( prompt )
 		printf ( "%s", prompt );
 
-	/* Initialise editable string */
-	memset ( &string, 0, sizeof ( string ) );
-	init_editstring ( &string, buf, sizeof ( buf ) );
-	buf[0] = '\0';
+	/* Ensure cursor is visible */
+	printf ( "\033[?25h" );
 
-	/* Prefill string, if applicable */
-	if ( prefill ) {
-		replace_string ( &string, prefill );
-		sync_console ( &string );
-	}
+	/* Initialise editable string */
+	*line = NULL;
+	memset ( &string, 0, sizeof ( string ) );
+	init_editstring ( &string, line );
+
+	/* Prefill string */
+	if ( ( rc = replace_string ( &string, prefill ) ) != 0 )
+		goto error;
+	sync_console ( &string );
 
 	while ( 1 ) {
+
+		/* Get keypress */
+		key = getkey ( timeout );
+		if ( key < 0 ) {
+			rc = -ETIMEDOUT;
+			goto error;
+		}
+		timeout = 0;
+
 		/* Handle keypress */
-		key = edit_string ( &string, getkey ( 0 ) );
+		key = edit_string ( &string, key );
 		sync_console ( &string );
 		move_by = 0;
 		switch ( key ) {
 		case CR:
 		case LF:
-			*line = strdup ( buf );
-			rc = ( ( *line ) ? 0 : -ENOMEM );
+			rc = 0;
 			goto done;
 		case CTRL_C:
 			rc = -ECANCELED;
-			goto done;
+			goto error;
 		case KEY_UP:
 			move_by = 1;
 			break;
@@ -298,13 +309,13 @@ int readline_history ( const char *prompt, const char *prefill,
 			move_by = -1;
 			break;
 		default:
-			/* Do nothing */
+			/* Do nothing for unrecognised keys or edit errors */
 			break;
 		}
 
 		/* Handle history movement, if applicable */
 		if ( move_by && history ) {
-			new_string = history_move ( history, move_by, buf );
+			new_string = history_move ( history, move_by, *line );
 			if ( new_string ) {
 				replace_string ( &string, new_string );
 				sync_console ( &string );
@@ -312,6 +323,9 @@ int readline_history ( const char *prompt, const char *prefill,
 		}
 	}
 
+ error:
+	free ( *line );
+	*line = NULL;
  done:
 	putchar ( '\n' );
 	if ( history ) {
@@ -335,6 +349,6 @@ int readline_history ( const char *prompt, const char *prefill,
 char * readline ( const char *prompt ) {
 	char *line;
 
-	readline_history ( prompt, NULL, NULL, &line );
+	readline_history ( prompt, NULL, NULL, 0, &line );
 	return line;
 }

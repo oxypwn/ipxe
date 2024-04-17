@@ -1,3 +1,27 @@
+/*
+ * Copyright (C) 2006 Michael Brown <mbrown@fensystems.co.uk>.
+ * Copyright (C) 2006 Nikhil Chandru Rao
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation; either version 2 of the
+ * License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ * 02110-1301, USA.
+ *
+ * You can also choose to distribute this program under the terms of
+ * the Unmodified Binary Distribution Licence (as given in the file
+ * COPYING.UBDL), provided that you have satisfied its requirements.
+ */
+
 #include <string.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -15,6 +39,8 @@
 #include <ipxe/dhcp.h>
 #include <ipxe/settings.h>
 #include <ipxe/fragment.h>
+#include <ipxe/ipstat.h>
+#include <ipxe/profile.h>
 
 /** @file
  *
@@ -22,13 +48,29 @@
  *
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 /* Unique IP datagram identification number (high byte) */
 static uint8_t next_ident_high = 0;
 
 /** List of IPv4 miniroutes */
 struct list_head ipv4_miniroutes = LIST_HEAD_INIT ( ipv4_miniroutes );
+
+/** IPv4 statistics */
+static struct ip_statistics ipv4_stats;
+
+/** IPv4 statistics family */
+struct ip_statistics_family
+ipv4_stats_family __ip_statistics_family ( IP_STATISTICS_IPV4 ) = {
+	.version = 4,
+	.stats = &ipv4_stats,
+};
+
+/** Transmit profiler */
+static struct profiler ipv4_tx_profiler __profiler = { .name = "ipv4.tx" };
+
+/** Receive profiler */
+static struct profiler ipv4_rx_profiler __profiler = { .name = "ipv4.rx" };
 
 /**
  * Add IPv4 minirouting table entry
@@ -37,11 +79,11 @@ struct list_head ipv4_miniroutes = LIST_HEAD_INIT ( ipv4_miniroutes );
  * @v address		IPv4 address
  * @v netmask		Subnet mask
  * @v gateway		Gateway address (if any)
- * @ret miniroute	Routing table entry, or NULL
+ * @ret rc		Return status code
  */
-static struct ipv4_miniroute * __malloc
-add_ipv4_miniroute ( struct net_device *netdev, struct in_addr address,
-		     struct in_addr netmask, struct in_addr gateway ) {
+static int add_ipv4_miniroute ( struct net_device *netdev,
+				struct in_addr address, struct in_addr netmask,
+				struct in_addr gateway ) {
 	struct ipv4_miniroute *miniroute;
 
 	DBGC ( netdev, "IPv4 add %s", inet_ntoa ( address ) );
@@ -54,7 +96,7 @@ add_ipv4_miniroute ( struct net_device *netdev, struct in_addr address,
 	miniroute = malloc ( sizeof ( *miniroute ) );
 	if ( ! miniroute ) {
 		DBGC ( netdev, "IPv4 could not add miniroute\n" );
-		return NULL;
+		return -ENOMEM;
 	}
 
 	/* Record routing information */
@@ -72,7 +114,7 @@ add_ipv4_miniroute ( struct net_device *netdev, struct in_addr address,
 		list_add ( &miniroute->list, &ipv4_miniroutes );
 	}
 
-	return miniroute;
+	return 0;
 }
 
 /**
@@ -97,6 +139,7 @@ static void del_ipv4_miniroute ( struct ipv4_miniroute *miniroute ) {
 /**
  * Perform IPv4 routing
  *
+ * @v scope_id		Destination address scope ID
  * @v dest		Final destination address
  * @ret dest		Next hop destination address
  * @ret miniroute	Routing table entry to use, or NULL if no route
@@ -104,26 +147,65 @@ static void del_ipv4_miniroute ( struct ipv4_miniroute *miniroute ) {
  * If the route requires use of a gateway, the next hop destination
  * address will be overwritten with the gateway address.
  */
-static struct ipv4_miniroute * ipv4_route ( struct in_addr *dest ) {
+static struct ipv4_miniroute * ipv4_route ( unsigned int scope_id,
+					    struct in_addr *dest ) {
 	struct ipv4_miniroute *miniroute;
-	int local;
-	int has_gw;
 
 	/* Find first usable route in routing table */
 	list_for_each_entry ( miniroute, &ipv4_miniroutes, list ) {
+
+		/* Skip closed network devices */
 		if ( ! netdev_is_open ( miniroute->netdev ) )
 			continue;
-		local = ( ( ( dest->s_addr ^ miniroute->address.s_addr )
-			    & miniroute->netmask.s_addr ) == 0 );
-		has_gw = ( miniroute->gateway.s_addr );
-		if ( local || has_gw ) {
-			if ( ! local )
+
+		if ( IN_IS_MULTICAST ( dest->s_addr ) ) {
+
+			/* If destination is non-global, and the scope ID
+			 * matches this network device, then use this route.
+			 */
+			if ( miniroute->netdev->scope_id == scope_id )
+				return miniroute;
+
+		} else {
+
+			/* If destination is an on-link global
+			 * address, then use this route.
+			 */
+			if ( ( ( dest->s_addr ^ miniroute->address.s_addr )
+			       & miniroute->netmask.s_addr ) == 0 )
+				return miniroute;
+
+			/* If destination is an off-link global
+			 * address, and we have a default gateway,
+			 * then use this route.
+			 */
+			if ( miniroute->gateway.s_addr ) {
 				*dest = miniroute->gateway;
-			return miniroute;
+				return miniroute;
+			}
 		}
 	}
 
 	return NULL;
+}
+
+/**
+ * Determine transmitting network device
+ *
+ * @v st_dest		Destination network-layer address
+ * @ret netdev		Transmitting network device, or NULL
+ */
+static struct net_device * ipv4_netdev ( struct sockaddr_tcpip *st_dest ) {
+	struct sockaddr_in *sin_dest = ( ( struct sockaddr_in * ) st_dest );
+	struct in_addr dest = sin_dest->sin_addr;
+	struct ipv4_miniroute *miniroute;
+
+	/* Find routing table entry */
+	miniroute = ipv4_route ( sin_dest->sin_scope_id, &dest );
+	if ( ! miniroute )
+		return NULL;
+
+	return miniroute->netdev;
 }
 
 /**
@@ -178,6 +260,7 @@ static struct fragment_reassembler ipv4_reassembler = {
 	.is_fragment = ipv4_is_fragment,
 	.fragment_offset = ipv4_fragment_offset,
 	.more_fragments = ipv4_more_fragments,
+	.stats = &ipv4_stats,
 };
 
 /**
@@ -232,6 +315,12 @@ static int ipv4_tx ( struct io_buffer *iobuf,
 	const void *ll_dest;
 	int rc;
 
+	/* Start profiling */
+	profile_start ( &ipv4_tx_profiler );
+
+	/* Update statistics */
+	ipv4_stats.out_requests++;
+
 	/* Fill up the IP header, except source address */
 	memset ( iphdr, 0, sizeof ( *iphdr ) );
 	iphdr->verhdrlen = ( IP_VER | ( sizeof ( *iphdr ) / 4 ) );
@@ -246,8 +335,8 @@ static int ipv4_tx ( struct io_buffer *iobuf,
 	if ( sin_src )
 		iphdr->src = sin_src->sin_addr;
 	if ( ( next_hop.s_addr != INADDR_BROADCAST ) &&
-	     ( ! IN_MULTICAST ( ntohl ( next_hop.s_addr ) ) ) &&
-	     ( ( miniroute = ipv4_route ( &next_hop ) ) != NULL ) ) {
+	     ( ( miniroute = ipv4_route ( sin_dest->sin_scope_id,
+					  &next_hop ) ) != NULL ) ) {
 		iphdr->src = miniroute->address;
 		netmask = miniroute->netmask;
 		netdev = miniroute->netdev;
@@ -255,6 +344,7 @@ static int ipv4_tx ( struct io_buffer *iobuf,
 	if ( ! netdev ) {
 		DBGC ( sin_dest->sin_addr, "IPv4 has no route to %s\n",
 		       inet_ntoa ( iphdr->dest ) );
+		ipv4_stats.out_no_routes++;
 		rc = -ENETUNREACH;
 		goto err;
 	}
@@ -268,8 +358,11 @@ static int ipv4_tx ( struct io_buffer *iobuf,
 			       ( ( netdev->rx_stats.good & 0xf ) << 0 ) );
 
 	/* Fix up checksums */
-	if ( trans_csum )
+	if ( trans_csum ) {
 		*trans_csum = ipv4_pshdr_chksum ( iobuf, *trans_csum );
+		if ( ! *trans_csum )
+			*trans_csum = tcpip_protocol->zero_csum;
+	}
 	iphdr->chksum = tcpip_chksum ( iphdr, sizeof ( *iphdr ) );
 
 	/* Print IP4 header for debugging */
@@ -282,9 +375,11 @@ static int ipv4_tx ( struct io_buffer *iobuf,
 	/* Calculate link-layer destination address, if possible */
 	if ( ( ( next_hop.s_addr ^ INADDR_BROADCAST ) & ~netmask.s_addr ) == 0){
 		/* Broadcast address */
+		ipv4_stats.out_bcast_pkts++;
 		ll_dest = netdev->ll_broadcast;
-	} else if ( IN_MULTICAST ( ntohl ( next_hop.s_addr ) ) ) {
+	} else if ( IN_IS_MULTICAST ( next_hop.s_addr ) ) {
 		/* Multicast address */
+		ipv4_stats.out_mcast_pkts++;
 		if ( ( rc = netdev->ll_protocol->mc_hash ( AF_INET, &next_hop,
 							   ll_dest_buf ) ) !=0){
 			DBGC ( sin_dest->sin_addr, "IPv4 could not hash "
@@ -297,6 +392,10 @@ static int ipv4_tx ( struct io_buffer *iobuf,
 		/* Unicast address */
 		ll_dest = NULL;
 	}
+
+	/* Update statistics */
+	ipv4_stats.out_transmits++;
+	ipv4_stats.out_octets += iob_len ( iobuf );
 
 	/* Hand off to link layer (via ARP if applicable) */
 	if ( ll_dest ) {
@@ -317,6 +416,7 @@ static int ipv4_tx ( struct io_buffer *iobuf,
 		}
 	}
 
+	profile_stop ( &ipv4_tx_profiler );
 	return 0;
 
  err:
@@ -389,43 +489,56 @@ static int ipv4_rx ( struct io_buffer *iobuf,
 	uint16_t pshdr_csum;
 	int rc;
 
+	/* Start profiling */
+	profile_start ( &ipv4_rx_profiler );
+
+	/* Update statistics */
+	ipv4_stats.in_receives++;
+	ipv4_stats.in_octets += iob_len ( iobuf );
+	if ( flags & LL_BROADCAST ) {
+		ipv4_stats.in_bcast_pkts++;
+	} else if ( flags & LL_MULTICAST ) {
+		ipv4_stats.in_mcast_pkts++;
+	}
+
 	/* Sanity check the IPv4 header */
 	if ( iob_len ( iobuf ) < sizeof ( *iphdr ) ) {
 		DBGC ( iphdr->src, "IPv4 packet too short at %zd bytes (min "
 		       "%zd bytes)\n", iob_len ( iobuf ), sizeof ( *iphdr ) );
-		goto err;
+		goto err_header;
 	}
 	if ( ( iphdr->verhdrlen & IP_MASK_VER ) != IP_VER ) {
 		DBGC ( iphdr->src, "IPv4 version %#02x not supported\n",
 		       iphdr->verhdrlen );
-		goto err;
+		goto err_header;
 	}
 	hdrlen = ( ( iphdr->verhdrlen & IP_MASK_HLEN ) * 4 );
 	if ( hdrlen < sizeof ( *iphdr ) ) {
 		DBGC ( iphdr->src, "IPv4 header too short at %zd bytes (min "
 		       "%zd bytes)\n", hdrlen, sizeof ( *iphdr ) );
-		goto err;
+		goto err_header;
 	}
 	if ( hdrlen > iob_len ( iobuf ) ) {
 		DBGC ( iphdr->src, "IPv4 header too long at %zd bytes "
 		       "(packet is %zd bytes)\n", hdrlen, iob_len ( iobuf ) );
-		goto err;
+		goto err_header;
 	}
 	if ( ( csum = tcpip_chksum ( iphdr, hdrlen ) ) != 0 ) {
 		DBGC ( iphdr->src, "IPv4 checksum incorrect (is %04x "
 		       "including checksum field, should be 0000)\n", csum );
-		goto err;
+		goto err_header;
 	}
 	len = ntohs ( iphdr->len );
 	if ( len < hdrlen ) {
 		DBGC ( iphdr->src, "IPv4 length too short at %zd bytes "
 		       "(header is %zd bytes)\n", len, hdrlen );
-		goto err;
+		goto err_header;
 	}
 	if ( len > iob_len ( iobuf ) ) {
 		DBGC ( iphdr->src, "IPv4 length too long at %zd bytes "
 		       "(packet is %zd bytes)\n", len, iob_len ( iobuf ) );
-		goto err;
+		ipv4_stats.in_truncated_pkts++;
+		goto err_other;
 	}
 
 	/* Truncate packet to correct length */
@@ -439,11 +552,13 @@ static int ipv4_rx ( struct io_buffer *iobuf,
 
 	/* Discard unicast packets not destined for us */
 	if ( ( ! ( flags & LL_MULTICAST ) ) &&
+	     ( iphdr->dest.s_addr != INADDR_BROADCAST ) &&
 	     ipv4_has_any_addr ( netdev ) &&
 	     ( ! ipv4_has_addr ( netdev, iphdr->dest ) ) ) {
 		DBGC ( iphdr->src, "IPv4 discarding non-local unicast packet "
 		       "for %s\n", inet_ntoa ( iphdr->dest ) );
-		goto err;
+		ipv4_stats.in_addr_errors++;
+		goto err_other;
 	}
 
 	/* Perform fragment reassembly if applicable */
@@ -470,15 +585,18 @@ static int ipv4_rx ( struct io_buffer *iobuf,
 	pshdr_csum = ipv4_pshdr_chksum ( iobuf, TCPIP_EMPTY_CSUM );
 	iob_pull ( iobuf, hdrlen );
 	if ( ( rc = tcpip_rx ( iobuf, netdev, iphdr->protocol, &src.st,
-			       &dest.st, pshdr_csum ) ) != 0 ) {
+			       &dest.st, pshdr_csum, &ipv4_stats ) ) != 0 ) {
 		DBGC ( src.sin.sin_addr, "IPv4 received packet rejected by "
 		       "stack: %s\n", strerror ( rc ) );
 		return rc;
 	}
 
+	profile_stop ( &ipv4_rx_profiler );
 	return 0;
 
- err:
+ err_header:
+	ipv4_stats.in_hdr_errors++;
+ err_other:
 	free_iob ( iobuf );
 	return -EINVAL;
 }
@@ -500,10 +618,42 @@ static int ipv4_arp_check ( struct net_device *netdev, const void *net_addr ) {
 }
 
 /**
+ * Parse IPv4 address
+ *
+ * @v string		IPv4 address string
+ * @ret in		IPv4 address to fill in
+ * @ret ok		IPv4 address is valid
+ *
+ * Note that this function returns nonzero iff the address is valid,
+ * to match the standard BSD API function of the same name.  Unlike
+ * most other iPXE functions, a zero therefore indicates failure.
+ */
+int inet_aton ( const char *string, struct in_addr *in ) {
+	const char *separator = "...";
+	uint8_t *byte = ( ( uint8_t * ) in );
+	char *endp;
+	unsigned long value;
+
+	while ( 1 ) {
+		value = strtoul ( string, &endp, 0 );
+		if ( string == endp )
+			return 0;
+		if ( value > 0xff )
+			return 0;
+		*(byte++) = value;
+		if ( *endp != *separator )
+			return 0;
+		if ( ! *(separator++) )
+			return 1;
+		string = ( endp + 1 );
+	}
+}
+
+/**
  * Convert IPv4 address to dotted-quad notation
  *
- * @v in	IP address
- * @ret string	IP address in dotted-quad notation
+ * @v in		IPv4 address
+ * @ret string		IPv4 address in dotted-quad notation
  */
 char * inet_ntoa ( struct in_addr in ) {
 	static char buf[16]; /* "xxx.xxx.xxx.xxx" */
@@ -514,10 +664,10 @@ char * inet_ntoa ( struct in_addr in ) {
 }
 
 /**
- * Transcribe IP address
+ * Transcribe IPv4 address
  *
- * @v net_addr	IP address
- * @ret string	IP address in dotted-quad notation
+ * @v net_addr		IPv4 address
+ * @ret string		IPv4 address in dotted-quad notation
  *
  */
 static const char * ipv4_ntoa ( const void *net_addr ) {
@@ -567,7 +717,10 @@ struct net_protocol ipv4_protocol __net_protocol = {
 struct tcpip_net_protocol ipv4_tcpip_protocol __tcpip_net_protocol = {
 	.name = "IPv4",
 	.sa_family = AF_INET,
+	.header_len = sizeof ( struct iphdr ),
+	.net_protocol = &ipv4_protocol,
 	.tx = ipv4_tx,
+	.netdev = ipv4_netdev,
 };
 
 /** IPv4 ARP protocol */
@@ -636,7 +789,7 @@ int format_ipv4_setting ( const struct setting_type *type __unused,
 }
 
 /** IPv4 address setting */
-const struct setting ip_setting __setting ( SETTING_IP, ip ) = {
+const struct setting ip_setting __setting ( SETTING_IP4, ip ) = {
 	.name = "ip",
 	.description = "IP address",
 	.tag = DHCP_EB_YIADDR,
@@ -644,7 +797,7 @@ const struct setting ip_setting __setting ( SETTING_IP, ip ) = {
 };
 
 /** IPv4 subnet mask setting */
-const struct setting netmask_setting __setting ( SETTING_IP, netmask ) = {
+const struct setting netmask_setting __setting ( SETTING_IP4, netmask ) = {
 	.name = "netmask",
 	.description = "Subnet mask",
 	.tag = DHCP_SUBNET_MASK,
@@ -652,12 +805,98 @@ const struct setting netmask_setting __setting ( SETTING_IP, netmask ) = {
 };
 
 /** Default gateway setting */
-const struct setting gateway_setting __setting ( SETTING_IP, gateway ) = {
+const struct setting gateway_setting __setting ( SETTING_IP4, gateway ) = {
 	.name = "gateway",
 	.description = "Default gateway",
 	.tag = DHCP_ROUTERS,
 	.type = &setting_type_ipv4,
 };
+
+/**
+ * Send gratuitous ARP, if applicable
+ *
+ * @v netdev		Network device
+ * @v address		IPv4 address
+ * @v netmask		Subnet mask
+ * @v gateway		Gateway address (if any)
+ * @ret rc		Return status code
+ */
+static int ipv4_gratuitous_arp ( struct net_device *netdev,
+				 struct in_addr address,
+				 struct in_addr netmask __unused,
+				 struct in_addr gateway __unused ) {
+	int rc;
+
+	/* Do nothing if network device already has this IPv4 address */
+	if ( ipv4_has_addr ( netdev, address ) )
+		return 0;
+
+	/* Transmit gratuitous ARP */
+	DBGC ( netdev, "IPv4 sending gratuitous ARP for %s via %s\n",
+	       inet_ntoa ( address ), netdev->name );
+	if ( ( rc = arp_tx_request ( netdev, &ipv4_protocol, &address,
+				     &address ) ) != 0 ) {
+		DBGC ( netdev, "IPv4 could not transmit gratuitous ARP: %s\n",
+		       strerror ( rc ) );
+		/* Treat failures as non-fatal */
+	}
+
+	return 0;
+}
+
+/**
+ * Process IPv4 network device settings
+ *
+ * @v apply		Application method
+ * @ret rc		Return status code
+ */
+static int ipv4_settings ( int ( * apply ) ( struct net_device *netdev,
+					     struct in_addr address,
+					     struct in_addr netmask,
+					     struct in_addr gateway ) ) {
+	struct net_device *netdev;
+	struct settings *settings;
+	struct in_addr address = { 0 };
+	struct in_addr netmask = { 0 };
+	struct in_addr gateway = { 0 };
+	int rc;
+
+	/* Process settings for each network device */
+	for_each_netdev ( netdev ) {
+
+		/* Get network device settings */
+		settings = netdev_settings ( netdev );
+
+		/* Get IPv4 address */
+		address.s_addr = 0;
+		fetch_ipv4_setting ( settings, &ip_setting, &address );
+		if ( ! address.s_addr )
+			continue;
+
+		/* Get subnet mask */
+		fetch_ipv4_setting ( settings, &netmask_setting, &netmask );
+
+		/* Calculate default netmask, if necessary */
+		if ( ! netmask.s_addr ) {
+			if ( IN_IS_CLASSA ( address.s_addr ) ) {
+				netmask.s_addr = INADDR_NET_CLASSA;
+			} else if ( IN_IS_CLASSB ( address.s_addr ) ) {
+				netmask.s_addr = INADDR_NET_CLASSB;
+			} else if ( IN_IS_CLASSC ( address.s_addr ) ) {
+				netmask.s_addr = INADDR_NET_CLASSC;
+			}
+		}
+
+		/* Get default gateway, if present */
+		fetch_ipv4_setting ( settings, &gateway_setting, &gateway );
+
+		/* Apply settings */
+		if ( ( rc = apply ( netdev, address, netmask, gateway ) ) != 0 )
+			return rc;
+	}
+
+	return 0;
+}
 
 /**
  * Create IPv4 routing table based on configured settings
@@ -667,44 +906,18 @@ const struct setting gateway_setting __setting ( SETTING_IP, gateway ) = {
 static int ipv4_create_routes ( void ) {
 	struct ipv4_miniroute *miniroute;
 	struct ipv4_miniroute *tmp;
-	struct net_device *netdev;
-	struct settings *settings;
-	struct in_addr address = { 0 };
-	struct in_addr netmask = { 0 };
-	struct in_addr gateway = { 0 };
+	int rc;
+
+	/* Send gratuitous ARPs for any new IPv4 addresses */
+	ipv4_settings ( ipv4_gratuitous_arp );
 
 	/* Delete all existing routes */
 	list_for_each_entry_safe ( miniroute, tmp, &ipv4_miniroutes, list )
 		del_ipv4_miniroute ( miniroute );
 
 	/* Create a route for each configured network device */
-	for_each_netdev ( netdev ) {
-		settings = netdev_settings ( netdev );
-		/* Get IPv4 address */
-		address.s_addr = 0;
-		fetch_ipv4_setting ( settings, &ip_setting, &address );
-		if ( ! address.s_addr )
-			continue;
-		/* Get subnet mask */
-		fetch_ipv4_setting ( settings, &netmask_setting, &netmask );
-		/* Calculate default netmask, if necessary */
-		if ( ! netmask.s_addr ) {
-			if ( IN_CLASSA ( ntohl ( address.s_addr ) ) ) {
-				netmask.s_addr = htonl ( IN_CLASSA_NET );
-			} else if ( IN_CLASSB ( ntohl ( address.s_addr ) ) ) {
-				netmask.s_addr = htonl ( IN_CLASSB_NET );
-			} else if ( IN_CLASSC ( ntohl ( address.s_addr ) ) ) {
-				netmask.s_addr = htonl ( IN_CLASSC_NET );
-			}
-		}
-		/* Get default gateway, if present */
-		fetch_ipv4_setting ( settings, &gateway_setting, &gateway );
-		/* Configure route */
-		miniroute = add_ipv4_miniroute ( netdev, address,
-						 netmask, gateway );
-		if ( ! miniroute )
-			return -ENOMEM;
-	}
+	if ( ( rc = ipv4_settings ( add_ipv4_miniroute ) ) != 0 )
+		return rc;
 
 	return 0;
 }
@@ -713,6 +926,9 @@ static int ipv4_create_routes ( void ) {
 struct settings_applicator ipv4_settings_applicator __settings_applicator = {
 	.apply = ipv4_create_routes,
 };
+
+/* Drag in objects via ipv4_protocol */
+REQUIRING_SYMBOL ( ipv4_protocol );
 
 /* Drag in ICMPv4 */
 REQUIRE_OBJECT ( icmpv4 );

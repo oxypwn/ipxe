@@ -15,13 +15,17 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
  * 02110-1301, USA.
+ *
+ * You can also choose to distribute this program under the terms of
+ * the Unmodified Binary Distribution Licence (as given in the file
+ * COPYING.UBDL), provided that you have satisfied its requirements.
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 /** @file
  *
- * Form parameters
+ * Request parameters
  *
  */
 
@@ -33,7 +37,30 @@ FILE_LICENCE ( GPL2_OR_LATER );
 static LIST_HEAD ( parameters );
 
 /**
- * Find form parameter list by name
+ * Free request parameter list
+ *
+ * @v refcnt		Reference count
+ */
+static void free_parameters ( struct refcnt *refcnt ) {
+	struct parameters *params =
+		container_of ( refcnt, struct parameters, refcnt );
+	struct parameter *param;
+	struct parameter *tmp;
+
+	DBGC ( params, "PARAMS \"%s\" destroyed\n", params->name );
+
+	/* Free all parameters */
+	list_for_each_entry_safe ( param, tmp, &params->entries, list ) {
+		list_del ( &param->list );
+		free ( param );
+	}
+
+	/* Free parameter list */
+	free ( params );
+}
+
+/**
+ * Find request parameter list by name
  *
  * @v name		Parameter list name (may be NULL)
  * @ret params		Parameter list, or NULL if not found
@@ -51,7 +78,7 @@ struct parameters * find_parameters ( const char *name ) {
 }
 
 /**
- * Create form parameter list
+ * Create request parameter list
  *
  * @v name		Parameter list name (may be NULL)
  * @ret params		Parameter list, or NULL on failure
@@ -63,14 +90,17 @@ struct parameters * create_parameters ( const char *name ) {
 
 	/* Destroy any existing parameter list of this name */
 	params = find_parameters ( name );
-	if ( params )
-		destroy_parameters ( params );
+	if ( params ) {
+		claim_parameters ( params );
+		params_put ( params );
+	}
 
 	/* Allocate parameter list */
 	name_len = ( name ? ( strlen ( name ) + 1 /* NUL */ ) : 0 );
 	params = zalloc ( sizeof ( *params ) + name_len );
 	if ( ! params )
 		return NULL;
+	ref_init ( &params->refcnt, free_parameters );
 	name_copy = ( ( void * ) ( params + 1 ) );
 
 	/* Populate parameter list */
@@ -88,15 +118,17 @@ struct parameters * create_parameters ( const char *name ) {
 }
 
 /**
- * Add form parameter
+ * Add request parameter
  *
  * @v params		Parameter list
  * @v key		Parameter key
  * @v value		Parameter value
+ * @v flags		Parameter flags
  * @ret param		Parameter, or NULL on failure
  */
 struct parameter * add_parameter ( struct parameters *params,
-				   const char *key, const char *value ) {
+				   const char *key, const char *value,
+				   unsigned int flags ) {
 	struct parameter *param;
 	size_t key_len;
 	size_t value_len;
@@ -117,49 +149,14 @@ struct parameter * add_parameter ( struct parameters *params,
 	param->key = key_copy;
 	strcpy ( value_copy, value );
 	param->value = value_copy;
+	param->flags = flags;
 
 	/* Add to list of parameters */
 	list_add_tail ( &param->list, &params->entries );
 
-	DBGC ( params, "PARAMS \"%s\" added \"%s\"=\"%s\"\n",
-	       params->name, param->key, param->value );
+	DBGC ( params, "PARAMS \"%s\" added \"%s\"=\"%s\"%s%s\n",
+	       params->name, param->key, param->value,
+	       ( ( param->flags & PARAMETER_FORM ) ? " (form)" : "" ),
+	       ( ( param->flags & PARAMETER_HEADER ) ? " (header)" : "" ) );
 	return param;
-}
-
-/**
- * Destroy form parameter list
- *
- * @v params		Parameter list
- */
-void destroy_parameters ( struct parameters *params ) {
-	struct parameter *param;
-	struct parameter *tmp;
-
-	DBGC ( params, "PARAMS \"%s\" destroyed\n", params->name );
-
-	/* Free all parameters */
-	list_for_each_entry_safe ( param, tmp, &params->entries, list ) {
-		list_del ( &param->list );
-		free ( param );
-	}
-
-	/* Free parameter list */
-	list_del ( &params->list );
-	free ( params );
-}
-
-/**
- * Claim ownership of form parameter list
- *
- * @v params		Parameter list
- */
-void claim_parameters ( struct parameters *params ) {
-
-	DBGC ( params, "PARAMS \"%s\" claimed\n", params->name );
-
-	/* Remove from list of parameter lists */
-	list_del ( &params->list );
-
-	/* Reinitialise list to allow for subsequent destroy_parameters() */
-	INIT_LIST_HEAD ( &params->list );
 }

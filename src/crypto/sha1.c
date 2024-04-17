@@ -15,9 +15,13 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
  * 02110-1301, USA.
+ *
+ * You can also choose to distribute this program under the terms of
+ * the Unmodified Binary Distribution Licence (as given in the file
+ * COPYING.UBDL), provided that you have satisfied its requirements.
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 /** @file
  *
@@ -31,7 +35,6 @@ FILE_LICENCE ( GPL2_OR_LATER );
 #include <assert.h>
 #include <ipxe/rotate.h>
 #include <ipxe/crypto.h>
-#include <ipxe/asn1.h>
 #include <ipxe/sha1.h>
 
 /** SHA-1 variables */
@@ -142,12 +145,12 @@ static void sha1_digest ( struct sha1_context *context ) {
 
 	/* Sanity checks */
 	assert ( ( context->len % sizeof ( context->ddd.dd.data ) ) == 0 );
-	linker_assert ( &u.ddd.dd.digest.h[0] == a, sha1_bad_layout );
-	linker_assert ( &u.ddd.dd.digest.h[1] == b, sha1_bad_layout );
-	linker_assert ( &u.ddd.dd.digest.h[2] == c, sha1_bad_layout );
-	linker_assert ( &u.ddd.dd.digest.h[3] == d, sha1_bad_layout );
-	linker_assert ( &u.ddd.dd.digest.h[4] == e, sha1_bad_layout );
-	linker_assert ( &u.ddd.dd.data.dword[0] == w, sha1_bad_layout );
+	build_assert ( &u.ddd.dd.digest.h[0] == a );
+	build_assert ( &u.ddd.dd.digest.h[1] == b );
+	build_assert ( &u.ddd.dd.digest.h[2] == c );
+	build_assert ( &u.ddd.dd.digest.h[3] == d );
+	build_assert ( &u.ddd.dd.digest.h[4] == e );
+	build_assert ( &u.ddd.dd.data.dword[0] == w );
 
 	DBGC ( context, "SHA1 digesting:\n" );
 	DBGC_HDA ( context, 0, &context->ddd.dd.digest,
@@ -259,14 +262,4 @@ struct digest_algorithm sha1_algorithm = {
 	.init		= sha1_init,
 	.update		= sha1_update,
 	.final		= sha1_final,
-};
-
-/** "sha1" object identifier */
-static uint8_t oid_sha1[] = { ASN1_OID_SHA1 };
-
-/** "sha1" OID-identified algorithm */
-struct asn1_algorithm oid_sha1_algorithm __asn1_algorithm = {
-	.name = "sha1",
-	.digest = &sha1_algorithm,
-	.oid = ASN1_OID_CURSOR ( oid_sha1 ),
 };

@@ -15,9 +15,13 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
  * 02110-1301, USA.
+ *
+ * You can also choose to distribute this program under the terms of
+ * the Unmodified Binary Distribution Licence (as given in the file
+ * COPYING.UBDL), provided that you have satisfied its requirements.
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 #include <string.h>
 #include <stdio.h>
@@ -28,8 +32,8 @@ FILE_LICENCE ( GPL2_OR_LATER );
 #include <ipxe/device.h>
 #include <ipxe/job.h>
 #include <ipxe/monojob.h>
-#include <ipxe/nap.h>
 #include <ipxe/timer.h>
+#include <ipxe/errortab.h>
 #include <usr/ifmgmt.h>
 
 /** @file
@@ -46,6 +50,11 @@ FILE_LICENCE ( GPL2_OR_LATER );
 #define EINFO_EADDRNOTAVAIL_CONFIG					\
 	__einfo_uniqify ( EINFO_EADDRNOTAVAIL, 0x01,			\
 			  "No configuration methods succeeded" )
+
+/** Human-readable error message */
+struct errortab ifmgmt_errors[] __errortab = {
+	__einfo_errortab ( EINFO_EADDRNOTAVAIL_CONFIG ),
+};
 
 /**
  * Open network device
@@ -99,12 +108,14 @@ static void ifstat_errors ( struct net_device_stats *stats,
  * @v netdev		Network device
  */
 void ifstat ( struct net_device *netdev ) {
-	printf ( "%s: %s using %s on %s (%s)\n"
-		 "  [Link:%s, TX:%d TXE:%d RX:%d RXE:%d]\n",
+	printf ( "%s: %s using %s on %s (%s) [%s]\n"
+		 "  [Link:%s%s, TX:%d TXE:%d RX:%d RXE:%d]\n",
 		 netdev->name, netdev_addr ( netdev ),
 		 netdev->dev->driver_name, netdev->dev->name,
+		 netdev->ll_protocol->name,
 		 ( netdev_is_open ( netdev ) ? "open" : "closed" ),
 		 ( netdev_link_ok ( netdev ) ? "up" : "down" ),
+		 ( netdev_link_blocked ( netdev ) ? " (blocked)" : "" ),
 		 netdev->tx_stats.good, netdev->tx_stats.bad,
 		 netdev->rx_stats.good, netdev->rx_stats.bad );
 	if ( ! netdev_link_ok ( netdev ) ) {
@@ -141,9 +152,6 @@ struct ifpoller {
  */
 static int ifpoller_progress ( struct ifpoller *ifpoller,
 			       struct job_progress *progress __unused ) {
-
-	/* Reduce CPU utilisation */
-	cpu_nap();
 
 	/* Hand off to current progress checker */
 	return ifpoller->progress ( ifpoller );
@@ -205,17 +213,20 @@ static int iflinkwait_progress ( struct ifpoller *ifpoller ) {
  *
  * @v netdev		Network device
  * @v timeout		Timeout period, in ticks
+ * @v verbose		Always display progress message
+ * @ret rc		Return status code
  */
-int iflinkwait ( struct net_device *netdev, unsigned long timeout ) {
+int iflinkwait ( struct net_device *netdev, unsigned long timeout,
+		 int verbose ) {
 	int rc;
 
 	/* Ensure device is open */
 	if ( ( rc = ifopen ( netdev ) ) != 0 )
 		return rc;
 
-	/* Return immediately if link is already up */
+	/* Return immediately if link is already up, unless being verbose */
 	netdev_poll ( netdev );
-	if ( netdev_link_ok ( netdev ) )
+	if ( netdev_link_ok ( netdev ) && ( ! verbose ) )
 		return 0;
 
 	/* Wait for link-up */
@@ -257,14 +268,16 @@ static int ifconf_progress ( struct ifpoller *ifpoller ) {
  *
  * @v netdev		Network device
  * @v configurator	Network device configurator, or NULL to use all
+ * @v timeout		Timeout period, in ticks
  * @ret rc		Return status code
  */
 int ifconf ( struct net_device *netdev,
-	     struct net_device_configurator *configurator ) {
+	     struct net_device_configurator *configurator,
+	     unsigned long timeout ) {
 	int rc;
 
 	/* Ensure device is open and link is up */
-	if ( ( rc = iflinkwait ( netdev, LINK_WAIT_TIMEOUT ) ) != 0 )
+	if ( ( rc = iflinkwait ( netdev, LINK_WAIT_TIMEOUT, 0 ) ) != 0 )
 		return rc;
 
 	/* Start configuration */
@@ -289,5 +302,5 @@ int ifconf ( struct net_device *netdev,
 		 ( configurator ? configurator->name : "" ),
 		 ( configurator ? "] " : "" ),
 		 netdev->name, netdev->ll_protocol->ntoa ( netdev->ll_addr ) );
-	return ifpoller_wait ( netdev, configurator, 0, ifconf_progress );
+	return ifpoller_wait ( netdev, configurator, timeout, ifconf_progress );
 }

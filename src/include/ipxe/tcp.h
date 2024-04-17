@@ -9,7 +9,7 @@
  *
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 #include <ipxe/tcpip.h>
 
@@ -26,7 +26,7 @@ struct tcp_header {
 	uint16_t win;		/* Advertised window */
 	uint16_t csum;		/* Checksum */
 	uint16_t urg;		/* Urgent pointer */
-};
+} __attribute__ (( packed ));
 
 /** @defgroup tcpopts TCP options
  * @{
@@ -79,6 +79,48 @@ struct tcp_window_scale_padded_option {
  */
 #define TCP_RX_WINDOW_SCALE 9
 
+/** TCP selective acknowledgement permitted option */
+struct tcp_sack_permitted_option {
+	uint8_t kind;
+	uint8_t length;
+} __attribute__ (( packed ));
+
+/** Padded TCP selective acknowledgement permitted option (used for sending) */
+struct tcp_sack_permitted_padded_option {
+	uint8_t nop[2];
+	struct tcp_sack_permitted_option spopt;
+} __attribute__ (( packed ));
+
+/** Code for the TCP selective acknowledgement permitted option */
+#define TCP_OPTION_SACK_PERMITTED 4
+
+/** TCP selective acknowledgement option */
+struct tcp_sack_option {
+	uint8_t kind;
+	uint8_t length;
+} __attribute__ (( packed ));
+
+/** TCP selective acknowledgement block */
+struct tcp_sack_block {
+	uint32_t left;
+	uint32_t right;
+} __attribute__ (( packed ));
+
+/** Maximum number of selective acknowledgement blocks
+ *
+ * This allows for the presence of the TCP timestamp option.
+ */
+#define TCP_SACK_MAX 3
+
+/** Padded TCP selective acknowledgement option (used for sending) */
+struct tcp_sack_padded_option {
+	uint8_t nop[2];
+	struct tcp_sack_option sackopt;
+} __attribute__ (( packed ));
+
+/** Code for the TCP selective acknowledgement option */
+#define TCP_OPTION_SACK 5
+
 /** TCP timestamp option */
 struct tcp_timestamp_option {
 	uint8_t kind;
@@ -98,10 +140,10 @@ struct tcp_timestamp_padded_option {
 
 /** Parsed TCP options */
 struct tcp_options {
-	/** MSS option, if present */
-	const struct tcp_mss_option *mssopt;
 	/** Window scale option, if present */
 	const struct tcp_window_scale_option *wsopt;
+	/** SACK permitted option, if present */
+	const struct tcp_sack_permitted_option *spopt;
 	/** Timestamp option, if present */
 	const struct tcp_timestamp_option *tsopt;
 };
@@ -297,11 +339,17 @@ struct tcp_options {
  *    a) Gigabit LAN: expected bandwidth 125MB/s, typical RTT 0.5ms,
  *       minimum required window 64kB
  *
- *    b) Home Internet connection: expected bandwidth 10MB/s, typical
- *       RTT 25ms, minimum required window 256kB
+ *    b) 10-Gigabit LAN: expected bandwidth 1250MB/s, typical RTT
+ *       0.5ms, minimum required window 640kB
  *
- *    c) WAN: expected bandwidth 2MB/s, typical RTT 100ms, minimum
- *       required window 200kB.
+ *    c) Home Internet connection: expected bandwidth 50MB/s, typical
+ *       RTT 25ms, minimum required window 1280kB
+ *
+ *    d) International WAN: expected bandwidth 50MB/s, typical RTT
+ *       25ms, minimum required window 1280kB
+ *
+ *    e) Intercontinental WAN: expected bandwidth 5MB/s, typical RTT
+ *       250ms, minimum required window 1280kB.
  *
  * The maximum possible value for the TCP window size is 1GB (using
  * the maximum window scale of 2**14).  However, it is advisable to
@@ -309,9 +357,9 @@ struct tcp_options {
  * bandwidth), since in the event of a lost packet the window size
  * represents the maximum amount that will need to be retransmitted.
  *
- * We therefore choose a maximum window size of 256kB.
+ * We therefore choose a (rounded up) maximum window size of 2048kB.
  */
-#define TCP_MAX_WINDOW_SIZE	( 256 * 1024 )
+#define TCP_MAX_WINDOW_SIZE	( 2048 * 1024 )
 
 /**
  * Path MTU
@@ -330,21 +378,19 @@ struct tcp_options {
 #define TCP_PATH_MTU							\
 	( 1280 - 40 /* IPv6 */ - 20 /* TCP */ - 12 /* TCP timestamp */ )
 
-/**
- * Advertised TCP MSS
- *
- * We currently hardcode this to a reasonable value and hope that the
- * sender uses path MTU discovery.  The alternative is breaking the
- * abstraction layer so that we can find out the MTU from the IP layer
- * (which would have to find out from the net device layer).
- */
-#define TCP_MSS 1460
-
 /** TCP maximum segment lifetime
  *
  * Currently set to 2 minutes, as per RFC 793.
  */
 #define TCP_MSL ( 2 * 60 * TICKS_PER_SEC )
+
+/**
+ * TCP keepalive period
+ *
+ * We send keepalive ACKs after this period of inactivity has elapsed
+ * on an established connection.
+ */
+#define TCP_KEEPALIVE_DELAY ( 15 * TICKS_PER_SEC )
 
 /**
  * TCP maximum header length
@@ -385,6 +431,13 @@ static inline int tcp_in_window ( uint32_t seq, uint32_t start,
 				  uint32_t len ) {
 	return ( ( seq - start ) < len );
 }
+
+/** TCP finish wait time
+ *
+ * Currently set to one second, since we should not allow a slowly
+ * responding server to substantially delay a call to shutdown().
+ */
+#define TCP_FINISH_TIMEOUT ( 1 * TICKS_PER_SEC )
 
 extern struct tcpip_protocol tcp_protocol __tcpip_protocol;
 

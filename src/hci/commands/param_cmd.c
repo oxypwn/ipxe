@@ -15,13 +15,17 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
  * 02110-1301, USA.
+ *
+ * You can also choose to distribute this program under the terms of
+ * the Unmodified Binary Distribution Licence (as given in the file
+ * COPYING.UBDL), provided that you have satisfied its requirements.
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 /** @file
  *
- * Form parameter commands
+ * Request parameter commands
  *
  */
 
@@ -74,8 +78,10 @@ static int params_exec ( int argc, char **argv ) {
 		return -ENOMEM;
 
 	/* Destroy parameter list, if applicable */
-	if ( opts.delete )
-		destroy_parameters ( params );
+	if ( opts.delete ) {
+		claim_parameters ( params );
+		params_put ( params );
+	}
 
 	return 0;
 }
@@ -84,12 +90,16 @@ static int params_exec ( int argc, char **argv ) {
 struct param_options {
 	/** Parameter list name */
 	char *params;
+	/** Parameter is a header */
+	int header;
 };
 
 /** "param" option list */
 static struct option_descriptor param_opts[] = {
 	OPTION_DESC ( "params", 'p', required_argument,
 		      struct param_options, params, parse_string ),
+	OPTION_DESC ( "header", 'H', no_argument,
+		      struct param_options, header, parse_flag ),
 };
 
 /** "param" command descriptor */
@@ -108,6 +118,7 @@ static int param_exec ( int argc, char **argv ) {
 	struct param_options opts;
 	char *key;
 	char *value;
+	unsigned int flags;
 	struct parameters *params;
 	struct parameter *param;
 	int rc;
@@ -126,12 +137,15 @@ static int param_exec ( int argc, char **argv ) {
 		goto err_parse_value;
 	}
 
+	/* Construct flags */
+	flags = ( opts.header ? PARAMETER_HEADER : PARAMETER_FORM );
+
 	/* Identify parameter list */
 	if ( ( rc = parse_parameters ( opts.params, &params ) ) != 0 )
 		goto err_parse_parameters;
 
 	/* Add parameter */
-	param = add_parameter ( params, key, value );
+	param = add_parameter ( params, key, value, flags );
 	if ( ! param ) {
 		rc = -ENOMEM;
 		goto err_add_parameter;
@@ -148,7 +162,7 @@ static int param_exec ( int argc, char **argv ) {
 	return rc;
 }
 
-/** Form parameter commands */
+/** Request parameter commands */
 struct command param_commands[] __command = {
 	{
 		.name = "params",

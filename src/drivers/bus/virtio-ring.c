@@ -18,8 +18,8 @@ FILE_LICENCE ( GPL2_OR_LATER );
 
 #include "etherboot.h"
 #include "ipxe/io.h"
-#include "ipxe/virtio-ring.h"
 #include "ipxe/virtio-pci.h"
+#include "ipxe/virtio-ring.h"
 
 #define BUG() do { \
    printf("BUG: failure at %s:%d/%s()!\n", \
@@ -98,7 +98,7 @@ void vring_add_buf(struct vring_virtqueue *vq,
    for (i = head; out; i = vr->desc[i].next, out--) {
 
            vr->desc[i].flags = VRING_DESC_F_NEXT;
-           vr->desc[i].addr = (u64)virt_to_phys(list->addr);
+           vr->desc[i].addr = list->addr;
            vr->desc[i].len = list->length;
            prev = i;
            list++;
@@ -106,7 +106,7 @@ void vring_add_buf(struct vring_virtqueue *vq,
    for ( ; in; i = vr->desc[i].next, in--) {
 
            vr->desc[i].flags = VRING_DESC_F_NEXT|VRING_DESC_F_WRITE;
-           vr->desc[i].addr = (u64)virt_to_phys(list->addr);
+           vr->desc[i].addr = list->addr;
            vr->desc[i].len = list->length;
            prev = i;
            list++;
@@ -122,7 +122,8 @@ void vring_add_buf(struct vring_virtqueue *vq,
    wmb();
 }
 
-void vring_kick(unsigned int ioaddr, struct vring_virtqueue *vq, int num_added)
+void vring_kick(struct virtio_pci_modern_device *vdev, unsigned int ioaddr,
+                struct vring_virtqueue *vq, int num_added)
 {
    struct vring *vr = &vq->vring;
 
@@ -130,7 +131,13 @@ void vring_kick(unsigned int ioaddr, struct vring_virtqueue *vq, int num_added)
    vr->avail->idx += num_added;
 
    mb();
-   if (!(vr->used->flags & VRING_USED_F_NO_NOTIFY))
-           vp_notify(ioaddr, vq->queue_index);
+   if (!(vr->used->flags & VRING_USED_F_NO_NOTIFY)) {
+           if (vdev) {
+                   /* virtio 1.0 */
+                   vpm_notify(vdev, vq);
+           } else {
+                   /* legacy virtio */
+                   vp_notify(ioaddr, vq->queue_index);
+           }
+   }
 }
-

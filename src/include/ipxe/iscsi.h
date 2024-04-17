@@ -7,7 +7,7 @@
  *
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 #include <stdint.h>
 #include <ipxe/socket.h>
@@ -16,9 +16,20 @@ FILE_LICENCE ( GPL2_OR_LATER );
 #include <ipxe/refcnt.h>
 #include <ipxe/xfer.h>
 #include <ipxe/process.h>
+#include <ipxe/acpi.h>
+#include <ipxe/settings.h>
 
 /** Default iSCSI port */
 #define ISCSI_PORT 3260
+
+/** Default iSCSI first burst length */
+#define ISCSI_FIRST_BURST_LEN 65536
+
+/** Default iSCSI maximum burst length */
+#define ISCSI_MAX_BURST_LEN 262144
+
+/** Default iSCSI maximum receive data segment length */
+#define ISCSI_MAX_RECV_DATA_SEG_LEN 8192
 
 /**
  * iSCSI segment lengths
@@ -575,6 +586,9 @@ struct iscsi_session {
 	/** CHAP response (used for both initiator and target auth) */
 	struct chap_response chap;
 
+	/** Maximum burst length */
+	size_t max_burst_len;
+
 	/** Initiator session ID (IANA format) qualifier
 	 *
 	 * This is part of the ISID.  It is generated randomly
@@ -647,6 +661,8 @@ struct iscsi_session {
 	struct sockaddr target_sockaddr;
 	/** SCSI LUN (for boot firmware table) */
 	struct scsi_lun lun;
+	/** ACPI descriptor */
+	struct acpi_descriptor desc;
 };
 
 /** iSCSI session is currently in the security negotiation phase */
@@ -696,5 +712,8 @@ struct iscsi_session {
 
 /** Default initiator IQN prefix */
 #define ISCSI_DEFAULT_IQN_PREFIX "iqn.2010-04.org.ipxe"
+
+extern const struct setting
+initiator_iqn_setting __setting ( SETTING_SANBOOT_EXTRA, initiator-iqn );
 
 #endif /* _IPXE_ISCSI_H */

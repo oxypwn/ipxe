@@ -15,13 +15,19 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
  * 02110-1301, USA.
+ *
+ * You can also choose to distribute this program under the terms of
+ * the Unmodified Binary Distribution Licence (as given in the file
+ * COPYING.UBDL), provided that you have satisfied its requirements.
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 #include <stdint.h>
 #include <stdio.h>
+#include <errno.h>
 #include <byteswap.h>
+#include <ipxe/base16.h>
 #include <ipxe/uuid.h>
 
 /** @file
@@ -36,7 +42,7 @@ FILE_LICENCE ( GPL2_OR_LATER );
  * @v uuid		UUID
  * @ret string		UUID in canonical form
  */
-char * uuid_ntoa ( const union uuid *uuid ) {
+const char * uuid_ntoa ( const union uuid *uuid ) {
 	static char buf[37]; /* "00000000-0000-0000-0000-000000000000" */
 
 	sprintf ( buf, "%08x-%04x-%04x-%04x-%02x%02x%02x%02x%02x%02x",
@@ -48,4 +54,30 @@ char * uuid_ntoa ( const union uuid *uuid ) {
 		  uuid->canonical.e[2], uuid->canonical.e[3],
 		  uuid->canonical.e[4], uuid->canonical.e[5] );
 	return buf;
+}
+
+/**
+ * Parse UUID
+ *
+ * @v string		UUID string
+ * @v uuid		UUID to fill in
+ * @ret rc		Return status code
+ */
+int uuid_aton ( const char *string, union uuid *uuid ) {
+	int len;
+	int rc;
+
+	/* Decode as hex string with optional '-' separator */
+	len = hex_decode ( ( '-' | HEX_DECODE_OPTIONAL ), string, uuid->raw,
+			   sizeof ( *uuid ) );
+	if ( len < 0 ) {
+		rc = len;
+		return rc;
+	}
+
+	/* Check length */
+	if ( len != sizeof ( *uuid ) )
+		return -EINVAL;
+
+	return 0;
 }

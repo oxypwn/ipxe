@@ -9,7 +9,7 @@
  * list.h.
  */
 
-FILE_LICENCE ( GPL2_ONLY );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 #include <stddef.h>
 #include <assert.h>
@@ -69,6 +69,8 @@ struct list_head {
 #define list_add( new, head ) do {				\
 	list_check ( (head) );					\
 	extern_list_add ( (new), (head) );			\
+	list_check ( (head) );					\
+	list_check ( (new) );					\
 	} while ( 0 )
 static inline void inline_list_add ( struct list_head *new,
 				     struct list_head *head ) {
@@ -91,6 +93,8 @@ extern void extern_list_add ( struct list_head *new,
 #define list_add_tail( new, head ) do {				\
 	list_check ( (head) );					\
 	extern_list_add_tail ( (new), (head) );			\
+	list_check ( (head) );					\
+	list_check ( (new) );					\
 	} while ( 0 )
 static inline void inline_list_add_tail ( struct list_head *new,
 					  struct list_head *head ) {
@@ -345,6 +349,67 @@ extern void extern_list_splice_tail_init ( struct list_head *list,
 	  list_entry ( (list)->prev, type, member ) )
 
 /**
+ * Get the container of the next entry in a list
+ *
+ * @v pos		Current list entry
+ * @v head		List head
+ * @v member		Name of list field within iterator's type
+ * @ret next		Next list entry, or NULL at end of list
+ */
+#define list_next_entry( pos, head, member ) ( {		\
+	typeof (pos) next = list_entry ( (pos)->member.next,	\
+					 typeof ( *(pos) ),	\
+					 member );		\
+	( ( &next->member == (head) ) ? NULL : next ); } )
+
+/**
+ * Get the container of the previous entry in a list
+ *
+ * @v pos		Current list entry
+ * @v head		List head
+ * @v member		Name of list field within iterator's type
+ * @ret next		Next list entry, or NULL at end of list
+ */
+#define list_prev_entry( pos, head, member ) ( {		\
+	typeof (pos) prev = list_entry ( (pos)->member.prev,	\
+					 typeof ( *(pos) ),	\
+					 member );		\
+	( ( &prev->member == (head) ) ? NULL : prev ); } )
+
+/**
+ * Test if entry is first in a list
+ *
+ * @v entry		List entry
+ * @v head		List head
+ * @v member		Name of list field within iterator's type
+ * @ret is_first	Entry is first in the list
+ */
+#define list_is_first_entry( entry, head, member )		\
+	( (head)->next == &(entry)->member )
+
+/**
+ * Test if entry is last in a list
+ *
+ * @v entry		List entry
+ * @v head		List head
+ * @v member		Name of list field within iterator's type
+ * @ret is_last		Entry is last in the list
+ */
+#define list_is_last_entry( entry, head, member )		\
+	( (head)->prev == &(entry)->member )
+
+/**
+ * Test if entry is the list head
+ *
+ * @v entry		List entry
+ * @v head		List head
+ * @v member		Name of list field within iterator's type
+ * @ret is_head		Entry is the list head
+ */
+#define list_is_head_entry( entry, head, member )		\
+	( (head) == &(entry)->member )
+
+/**
  * Iterate over a list
  *
  * @v pos		Iterator
@@ -423,6 +488,22 @@ extern void extern_list_splice_tail_init ( struct list_head *list,
 	      pos = list_entry ( pos->member.prev, typeof ( *pos ), member ); \
 	      &pos->member != (head);					      \
 	      pos = list_entry ( pos->member.prev, typeof ( *pos ), member ) )
+
+/**
+ * Iterate over subsequent entries in a list, safe against deletion
+ *
+ * @v pos		Iterator
+ * @v tmp		Temporary value (of same type as iterator)
+ * @v head		List head
+ * @v member		Name of list field within iterator's type
+ */
+#define list_for_each_entry_safe_continue( pos, tmp, head, member )	      \
+	for ( list_check ( (head) ),					      \
+	      pos = list_entry ( pos->member.next, typeof ( *pos ), member ), \
+	      tmp = list_entry ( pos->member.next, typeof ( *tmp ), member ); \
+	      &pos->member != (head);					      \
+	      pos = tmp,						      \
+	      tmp = list_entry ( tmp->member.next, typeof ( *tmp ), member ) )
 
 /**
  * Test if list contains a specified entry

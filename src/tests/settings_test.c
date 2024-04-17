@@ -15,9 +15,13 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
  * 02110-1301, USA.
+ *
+ * You can also choose to distribute this program under the terms of
+ * the Unmodified Binary Distribution Licence (as given in the file
+ * COPYING.UBDL), provided that you have satisfied its requirements.
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 /** @file
  *
@@ -234,10 +238,22 @@ static struct setting test_hexraw_setting = {
 	.type = &setting_type_hexraw,
 };
 
+/** Test Base64 setting type */
+static struct setting test_base64_setting = {
+	.name = "test_base64",
+	.type = &setting_type_base64,
+};
+
 /** Test UUID setting type */
 static struct setting test_uuid_setting = {
 	.name = "test_uuid",
 	.type = &setting_type_uuid,
+};
+
+/** Test GUID setting type */
+static struct setting test_guid_setting = {
+	.name = "test_guid",
+	.type = &setting_type_guid,
 };
 
 /** Test PCI bus:dev.fn setting type */
@@ -267,6 +283,9 @@ static void settings_test_exec ( void ) {
 			  'd' ) );
 	fetchf_ok ( &test_settings, &test_uristring_setting,
 		    RAW ( 1, 2, 3, 4, 5 ), "%01%02%03%04%05" );
+	fetchf_ok ( &test_settings, &test_uristring_setting,
+		    RAW ( 0, ' ', '%', '/', '#', ':', '@', '?', '=', '&' ),
+		    "%00%20%25%2F%23%3A%40%3F%3D%26" );
 
 	/* "ipv4" setting type */
 	storef_ok ( &test_settings, &test_ipv4_setting, "192.168.0.1",
@@ -392,15 +411,38 @@ static void settings_test_exec ( void ) {
 			  0x17, 0x06, 0x39, 0x6b, 0xf4, 0x48, 0x4e ),
 		    "9e4b6eef36b646fe8f1706396bf4484e" );
 
-	/* "uuid" setting type (no store capability) */
+	/* "base64" setting type */
+	storef_ok ( &test_settings, &test_base64_setting,
+		    "cGFzc6\nNwaHJhc2U= ",
+		    RAW ( 0x70, 0x61, 0x73, 0x73, 0xa3, 0x70, 0x68, 0x72, 0x61,
+			  0x73, 0x65 ) );
+	fetchf_ok ( &test_settings, &test_base64_setting,
+		    RAW ( 0x80, 0x81, 0x82, 0x83, 0x84, 0x00, 0xff ),
+		    "gIGCg4QA/w==" );
+
+	/* "uuid" setting type */
+	storef_ok ( &test_settings, &test_uuid_setting,
+		    "36d22ed9-b64f-4fdb-941b-a54a0854f991",
+		    RAW ( 0x36, 0xd2, 0x2e, 0xd9, 0xb6, 0x4f, 0x4f, 0xdb, 0x94,
+			  0x1b, 0xa5, 0x4a, 0x08, 0x54, 0xf9, 0x91 ) );
+	storef_ok ( &test_settings, &test_guid_setting,
+		    "7ad4478f-c270-4601-a245-78598f25a984",
+		    RAW ( 0x8f, 0x47, 0xd4, 0x7a, 0x70, 0xc2, 0x01, 0x46, 0xa2,
+			  0x45, 0x78, 0x59, 0x8f, 0x25, 0xa9, 0x84 ) );
 	fetchf_ok ( &test_settings, &test_uuid_setting,
-		    RAW ( 0x1a, 0x6a, 0x74, 0x9d, 0x0e, 0xda, 0x46, 0x1a,0xa8,
+		    RAW ( 0x1a, 0x6a, 0x74, 0x9d, 0x0e, 0xda, 0x46, 0x1a, 0xa8,
 			  0x7a, 0x7c, 0xfe, 0x4f, 0xca, 0x4a, 0x57 ),
 		    "1a6a749d-0eda-461a-a87a-7cfe4fca4a57" );
+	fetchf_ok ( &test_settings, &test_guid_setting,
+		    RAW ( 0x1a, 0x6a, 0x74, 0x9d, 0x0e, 0xda, 0x46, 0x1a, 0xa8,
+			  0x7a, 0x7c, 0xfe, 0x4f, 0xca, 0x4a, 0x57 ),
+		    "9d746a1a-da0e-1a46-a87a-7cfe4fca4a57" );
 
 	/* "busdevfn" setting type (no store capability) */
 	fetchf_ok ( &test_settings, &test_busdevfn_setting,
-		    RAW ( 0x03, 0x45 ), "03:08.5" );
+		    RAW ( 0x03, 0x45 ), "0000:03:08.5" );
+	fetchf_ok ( &test_settings, &test_busdevfn_setting,
+		    RAW ( 0x00, 0x02, 0x0a, 0x21 ), "0002:0a:04.1" );
 
 	/* Clear and unregister test settings block */
 	clear_settings ( &test_settings );
@@ -412,3 +454,7 @@ struct self_test settings_test __self_test = {
 	.name = "settings",
 	.exec = settings_test_exec,
 };
+
+/* Include real IPv6 setting type */
+REQUIRING_SYMBOL ( settings_test );
+REQUIRE_OBJECT ( ipv6 );
